@@ -1497,11 +1497,12 @@ fun KhoApp(
                             modifier = Modifier
                                 .offset(
                                     x = fabMargin +
-                                        (maxWidth - fabSize - fabMargin * 2).coerceAtLeast(0.dp) *
+                                        (containerWidth - fabSize - fabMargin * 2)
+                                            .coerceAtLeast(0.dp) *
                                         filterFabX,
                                     y = fabMargin +
-                                        (maxHeight - fabSize - fabMargin * 2).coerceAtLeast(0.dp) *
-                                        filterFabY
+                                        (containerHeight - fabSize - fabMargin * 2)
+                                            .coerceAtLeast(0.dp) * filterFabY
                                 )
                                 .size(fabSize)
                                 .pointerInput(containerWidth, containerHeight) {
