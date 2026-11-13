@@ -53,11 +53,12 @@ internal fun QrUndoBanner(
     message: String,
     onUndo: () -> Unit,
     onDismiss: () -> Unit,
+    durationMillis: Int = 3_000,
     modifier: Modifier = Modifier
 ) {
     val progress = remember(message) { Animatable(0f) }
     LaunchedEffect(message) {
-        progress.animateTo(1f, animationSpec = tween(durationMillis = 3_000))
+        progress.animateTo(1f, animationSpec = tween(durationMillis = durationMillis))
     }
     Surface(
         modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp).widthIn(max = 440.dp),

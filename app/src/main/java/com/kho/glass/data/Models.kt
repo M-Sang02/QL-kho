@@ -16,7 +16,16 @@ data class Product(
     val unitSummaryLabel: String = "loại",
     val branches: List<UnitBranch> = emptyList()
 )
-data class UnitBranch(val id:String, val name:String, val stock:Double, val unitType:UnitType, val buyPrice:Long=0L, val sellPrice:Long=0L, val lowStockThreshold:Double=2.0)
+data class UnitBranch(
+    val id: String,
+    val name: String,
+    val stock: Double,
+    val unitType: UnitType,
+    val buyPrice: Long = 0L,
+    val sellPrice: Long = 0L,
+    val lowStockThreshold: Double = 2.0,
+    val archivedStock: Double = 0.0
+)
 enum class UnitType { PIECE, WEIGHT, OTHER }
 data class DashboardStats(val stockValue:Long=0L,val exportedValue:Long=0L,val revenue:Long=0L,val receivable:Long=0L,val profit:Long=0L)
 

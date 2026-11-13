@@ -24,6 +24,9 @@ import com.kho.glass.data.UnitType
 import com.kho.glass.data.calculateAmount
 import com.kho.glass.data.parseCurrencyInput
 import java.io.IOException
+import java.util.UUID
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -55,6 +58,8 @@ class KhoViewModel(
     private val storeUserId = userId
     private val localWarehouseId = warehouseId
     private val store = LocalStore(application, userId, warehouseId)
+    private val pendingDeleteTokens = mutableMapOf<String, String>()
+    private val pendingDeleteJobs = mutableMapOf<String, Job>()
 
     init {
         ArchivedProductCleanupWorker.schedule(
@@ -189,9 +194,61 @@ class KhoViewModel(
         message = "Đã khôi phục sản phẩm."
     }
 
-    fun permanentlyDeleteProduct(productId: String) = performAction {
-        store.permanentlyDeleteProduct(productId)
-        message = "Đã xóa sản phẩm và ảnh khỏi danh sách kho; đơn hàng cũ vẫn được giữ."
+    fun reactivateProducts(productIds: List<String>) = performAction {
+        productIds.distinct().forEach { store.reactivateProduct(it) }
+        message = "Đã khôi phục ${productIds.distinct().size} sản phẩm."
+    }
+
+    fun permanentlyDeleteProduct(productId: String) =
+        permanentlyDeleteProductsWithUndo(listOf(productId))
+
+    fun permanentlyDeleteProductsWithUndo(productIds: List<String>) = performAction {
+        val ids = productIds.distinct()
+        if (ids.isEmpty()) return@performAction
+        store.permanentlyDeleteProducts(ids)
+        val token = UUID.randomUUID().toString()
+        ids.forEach { pendingDeleteTokens[it] = token }
+        pendingDeleteJobs[token]?.cancel()
+        pendingDeleteJobs[token] = viewModelScope.launch {
+            delay(5_000L)
+            try {
+                store.finalizePermanentDeletion(ids)
+                ids.forEach { pendingDeleteTokens.remove(it, token) }
+                pendingDeleteJobs.remove(token)
+                accountUid?.let {
+                    FirestoreWarehouseSync.schedule(
+                        getApplication<Application>(),
+                        it,
+                        storeUserId,
+                        localWarehouseId,
+                        remoteWarehouseId
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IOException) {
+                message = "Không dọn được ảnh đã xóa: ${error.localizedMessage ?: "lỗi tệp"}"
+            } catch (error: SQLiteException) {
+                message = "Không lưu được dữ liệu xóa: ${error.localizedMessage ?: "lỗi cơ sở dữ liệu"}"
+            } catch (error: IllegalStateException) {
+                message = "Không hoàn tất xóa sản phẩm: ${error.localizedMessage ?: "lỗi dữ liệu"}"
+            } finally {
+                ids.forEach { pendingDeleteTokens.remove(it, token) }
+                pendingDeleteJobs.remove(token)
+            }
+        }
+        message = "Đã xóa khỏi danh sách. Có thể hoàn tác trong 5 giây."
+    }
+
+    fun undoPermanentlyDeletedProducts(productIds: List<String>) = performAction {
+        val ids = productIds.distinct()
+        store.undoPermanentlyDeletedProducts(ids)
+        val tokens = ids.mapNotNull { pendingDeleteTokens[it] }.toSet()
+        tokens.forEach { token ->
+            pendingDeleteJobs.remove(token)?.cancel()
+        }
+        ids.forEach { pendingDeleteTokens.remove(it) }
+        message = "Đã hoàn tác xóa sản phẩm."
     }
 
     fun hidePartialStock(productId: String, branchId: String, quantity: String) = performAction {

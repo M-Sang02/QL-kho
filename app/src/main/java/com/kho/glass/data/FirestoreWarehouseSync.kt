@@ -491,7 +491,8 @@ private fun List<CloudRecord>.toLatestSnapshot(): CloudWarehouseSnapshot {
             archivedAt = data.nullableLong("archivedAt"),
             deletedAt = data.nullableLong("deletedAt"),
             unitSummaryLabel = data.string("unitSummaryLabel"),
-            additionalImagePaths = "[]"
+            additionalImagePaths = "[]",
+            preDeleteActive = data["preDeleteActive"] as? Boolean ?: false
         )
         if (product.id in permanentlyDeletedProductIds) {
             product.copy(active = false, permanentlyDeleted = true)
@@ -508,7 +509,8 @@ private fun List<CloudRecord>.toLatestSnapshot(): CloudWarehouseSnapshot {
             stock = data.double("stock"),
             buyPrice = data.long("buyPrice"),
             sellPrice = data.long("sellPrice"),
-            lowStockThreshold = data.double("lowStockThreshold")
+            lowStockThreshold = data.double("lowStockThreshold"),
+            archivedStock = (data["archivedStock"] as? Number)?.toDouble() ?: 0.0
         )
     }
     val batches = rows("batches").map { data ->

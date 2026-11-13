@@ -2,6 +2,7 @@ package com.kho.glass.ui
 
 import android.app.Application
 import android.content.Context
+import android.content.ClipData
 import android.content.Intent
 import android.database.sqlite.SQLiteException
 import android.graphics.Bitmap
@@ -76,6 +77,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteForever
@@ -175,6 +177,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.widget.Toast
 import coil.compose.AsyncImage
 import com.kho.glass.data.InventoryBackup
 import com.kho.glass.data.InventoryBackupProduct
@@ -195,6 +198,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Date
+import java.util.Calendar
 import java.util.Locale
 import java.util.UUID
 import org.json.JSONException
@@ -394,6 +398,12 @@ fun KhoApp(
     var inventoryRefreshing by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) } // Kho, Lịch sử, Bán hàng, Tổng quan, Cài đặt, Báo cáo
     var productFilter by remember { mutableStateOf(ProductFilter.ALL) }
+    var archivedSelectionMode by remember(selectedWarehouseId) { mutableStateOf(false) }
+    var selectedArchivedProductIds by remember(selectedWarehouseId) {
+        mutableStateOf<Set<String>>(emptySet())
+    }
+    var confirmBulkArchiveDelete by remember { mutableStateOf(false) }
+    var pendingArchiveDeleteIds by remember { mutableStateOf<List<String>>(emptyList()) }
     var sortField by remember(preferences, selectedWarehouseId) {
         mutableStateOf(
             SortField.entries.firstOrNull {
@@ -475,6 +485,8 @@ fun KhoApp(
         )
     }
     var qrImagePickerMessage by remember { mutableStateOf<String?>(null) }
+    var qrCameraFile by remember { mutableStateOf<File?>(null) }
+    var qrCameraUri by remember { mutableStateOf<Uri?>(null) }
     val qrImagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
@@ -490,6 +502,58 @@ fun KhoApp(
                     qrImagePickerMessage =
                         "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
                 }
+            }
+        }
+        val qrCameraPicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.TakePicture()
+        ) { captured ->
+            val file = qrCameraFile
+            val uri = qrCameraUri
+            if (captured && file?.isFile == true && uri != null) {
+                scope.launch {
+                    try {
+                        val savedPath = withContext(Dispatchers.IO) {
+                            persistProductImage(context, uri, null, file.length())
+                        }
+                        qrEditorImagePath = savedPath
+                        qrEditorCreatedImages = qrEditorCreatedImages + savedPath
+                    } catch (failure: IOException) {
+                        qrImagePickerMessage =
+                            "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                    } finally {
+                        file.delete()
+                        qrCameraFile = null
+                        qrCameraUri = null
+                    }
+                }
+            } else {
+                file?.delete()
+                qrCameraFile = null
+                qrCameraUri = null
+                if (!captured) qrImagePickerMessage = "Không chụp được ảnh mã QR."
+            }
+        }
+
+        fun captureQrImage() {
+            try {
+                val directory = File(context.cacheDir, "product-captures")
+                if (!directory.exists() && !directory.mkdirs()) {
+                    throw IOException("Không tạo được thư mục ảnh tạm.")
+                }
+                val file = File.createTempFile("qr_capture_", ".jpg", directory)
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+                qrCameraFile = file
+                qrCameraUri = uri
+                qrCameraPicker.launch(uri)
+            } catch (failure: IOException) {
+                qrImagePickerMessage =
+                    "Không thể mở máy ảnh: ${failure.localizedMessage ?: "lỗi tệp"}"
+            } catch (failure: IllegalArgumentException) {
+                qrImagePickerMessage = "Không thể tạo địa chỉ ảnh tạm."
             }
         }
     }
@@ -629,6 +693,17 @@ fun KhoApp(
             .putFloat("${warehousePreferencesPrefix}qr_fab_x", qrX)
             .putFloat("${warehousePreferencesPrefix}qr_fab_y", qrY)
             .apply()
+    }
+    LaunchedEffect(tab, productFilter) {
+        if (tab != 0 || productFilter != ProductFilter.ARCHIVED) {
+            archivedSelectionMode = false
+            selectedArchivedProductIds = emptySet()
+        }
+    }
+    LaunchedEffect(pendingArchiveDeleteIds) {
+        if (pendingArchiveDeleteIds.isEmpty()) return@LaunchedEffect
+        delay(5_000L)
+        pendingArchiveDeleteIds = emptyList()
     }
     LaunchedEffect(pendingQrDelete?.token) {
         val deletion = pendingQrDelete ?: return@LaunchedEffect
@@ -1107,7 +1182,15 @@ fun KhoApp(
                         isRefreshing = inventoryRefreshing,
                         onRefresh = ::refreshInventory,
                         scrollToProductId = scrollToInventoryProductId,
-                        onProductScrolled = { scrollToInventoryProductId = null }
+                        onProductScrolled = { scrollToInventoryProductId = null },
+                        archivedSelectionMode = archivedSelectionMode,
+                        selectedArchivedProductIds = selectedArchivedProductIds,
+                        onArchiveSelectionModeChange = { archivedSelectionMode = it },
+                        onArchivedSelectionChange = { selectedArchivedProductIds = it },
+                        onDeleteArchivedProduct = { id ->
+                            vm.permanentlyDeleteProduct(id)
+                            pendingArchiveDeleteIds = listOf(id)
+                        }
                     )
                     1 -> StockHistoryScreen(stockMovements)
                     2 -> SalesScreen(products, orders, vm)
@@ -1336,6 +1419,18 @@ fun KhoApp(
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
                     )
                 }
+                pendingArchiveDeleteIds.takeIf { it.isNotEmpty() }?.let { deletedIds ->
+                    QrUndoBanner(
+                        message = "Đã xóa ${deletedIds.size} sản phẩm khỏi kho",
+                        durationMillis = 5_000,
+                        onUndo = {
+                            vm.undoPermanentlyDeletedProducts(deletedIds)
+                            pendingArchiveDeleteIds = emptyList()
+                        },
+                        onDismiss = { pendingArchiveDeleteIds = emptyList() },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                    )
+                }
                 qrImagePickerMessage?.let { message ->
                     ProductAddedBanner(
                         message = message,
@@ -1347,8 +1442,16 @@ fun KhoApp(
                     val fabSize = 56.dp
                     val fabMargin = 16.dp
                     val density = LocalDensity.current
+                    val archiveActions = tab == 0 &&
+                        productFilter == ProductFilter.ARCHIVED &&
+                        archivedSelectionMode
+                    val selectedIds = selectedArchivedProductIds.toList()
                     FloatingActionButton(
-                        onClick = { vm.addDialog = true },
+                        onClick = {
+                            if (archiveActions) {
+                                if (selectedIds.isNotEmpty()) confirmBulkArchiveDelete = true
+                            } else vm.addDialog = true
+                        },
                         modifier = Modifier
                             .offset(
                                 x = fabMargin +
@@ -1357,7 +1460,12 @@ fun KhoApp(
                                     (maxHeight - fabSize - fabMargin * 2).coerceAtLeast(0.dp) * fabY
                             )
                             .size(fabSize)
-                            .pointerInput(containerWidth, containerHeight) {
+                            .pointerInput(
+                                containerWidth,
+                                containerHeight,
+                                archivedSelectionMode,
+                                selectedArchivedProductIds
+                            ) {
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
                                     val downAt = SystemClock.uptimeMillis()
@@ -1374,7 +1482,11 @@ fun KhoApp(
                                             if (!dragging &&
                                                 SystemClock.uptimeMillis() - downAt < 1_000L
                                             ) {
-                                                vm.addDialog = true
+                                                if (archiveActions) {
+                                                    if (selectedIds.isNotEmpty()) {
+                                                        confirmBulkArchiveDelete = true
+                                                    }
+                                                } else vm.addDialog = true
                                             }
                                             finished = true
                                         } else if (
@@ -1407,14 +1519,26 @@ fun KhoApp(
                         contentColor = MaterialTheme.colorScheme.onPrimary
                     ) {
                         Icon(
-                            Icons.Default.Add,
-                            contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để thêm sản phẩm",
+                            if (archiveActions) Icons.Default.Edit else Icons.Default.Add,
+                            contentDescription = if (archiveActions) {
+                                "Xóa các sản phẩm đã chọn"
+                            } else {
+                                "Nhấn giữ 1 giây để di chuyển; chạm để thêm sản phẩm"
+                            },
                             tint = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                     FloatingActionButton(
-                        onClick = { tab = 9 },
+                        onClick = {
+                            if (archiveActions) {
+                                if (selectedIds.isNotEmpty()) {
+                                    vm.reactivateProducts(selectedIds)
+                                    selectedArchivedProductIds = emptySet()
+                                    archivedSelectionMode = false
+                                }
+                            } else tab = 9
+                        },
                         modifier = Modifier
                             .offset(
                                 x = fabMargin +
@@ -1425,7 +1549,12 @@ fun KhoApp(
                                         .coerceAtLeast(0.dp) * qrY
                             )
                             .size(fabSize)
-                            .pointerInput(containerWidth, containerHeight) {
+                            .pointerInput(
+                                containerWidth,
+                                containerHeight,
+                                archivedSelectionMode,
+                                selectedArchivedProductIds
+                            ) {
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
                                     val downAt = SystemClock.uptimeMillis()
@@ -1442,7 +1571,13 @@ fun KhoApp(
                                             if (!dragging &&
                                                 SystemClock.uptimeMillis() - downAt < 1_000L
                                             ) {
-                                                tab = 9
+                                                if (archiveActions) {
+                                                    if (selectedIds.isNotEmpty()) {
+                                                        vm.reactivateProducts(selectedIds)
+                                                        selectedArchivedProductIds = emptySet()
+                                                        archivedSelectionMode = false
+                                                    }
+                                                } else tab = 9
                                             }
                                             finished = true
                                         } else if (
@@ -1476,8 +1611,12 @@ fun KhoApp(
                         contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                     ) {
                         Icon(
-                            Icons.Default.QrCode2,
-                            contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để mở mã QR",
+                            if (archiveActions) Icons.Default.Restore else Icons.Default.QrCode2,
+                            contentDescription = if (archiveActions) {
+                                "Khôi phục các sản phẩm đã chọn"
+                            } else {
+                                "Nhấn giữ 1 giây để di chuyển; chạm để mở mã QR"
+                            },
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -1564,6 +1703,35 @@ fun KhoApp(
                     }
                 }
             }
+        }
+
+        if (confirmBulkArchiveDelete) {
+            val selectedCount = selectedArchivedProductIds.size
+            AlertDialog(
+                onDismissRequest = { confirmBulkArchiveDelete = false },
+                title = { DialogTitleWithClose("Xóa sản phẩm đã chọn?") { confirmBulkArchiveDelete = false } },
+                text = {
+                    Text(
+                        "Xóa $selectedCount sản phẩm khỏi mục Đã ẩn? " +
+                            "Bạn có thể hoàn tác trong 5 giây."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val ids = selectedArchivedProductIds.toList()
+                        vm.permanentlyDeleteProductsWithUndo(ids)
+                        pendingArchiveDeleteIds = ids
+                        selectedArchivedProductIds = emptySet()
+                        archivedSelectionMode = false
+                        confirmBulkArchiveDelete = false
+                    }) { Text("Xóa") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmBulkArchiveDelete = false }) {
+                        Text("Hủy")
+                    }
+                }
+            )
         }
 
         if (vm.addDialog) {
@@ -1708,6 +1876,7 @@ fun KhoApp(
                 initialEntry = existingQr,
                 imagePath = qrEditorImagePath,
                 onPickImage = { qrImagePicker.launch("image/*") },
+                onCaptureImage = ::captureQrImage,
                 onDismiss = {
                     try {
                         InventoryBackup.deleteImages(
@@ -2356,6 +2525,8 @@ private fun ReceiveQrScreen(
     onAdd: () -> Unit,
     onManage: () -> Unit
 ) {
+    val context = LocalContext.current
+    var fullscreenImagePath by remember { mutableStateOf<String?>(null) }
     val selectedEntry = entries.getOrNull(selectedIndex)
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -2404,7 +2575,10 @@ private fun ReceiveQrScreen(
                     AsyncImage(
                         model = File(selectedEntry.imagePath),
                         contentDescription = "Mã QR của ${selectedEntry.recipientName}",
-                        modifier = Modifier.fillMaxSize().padding(12.dp),
+                        modifier = Modifier.fillMaxSize().padding(12.dp).combinedClickable(
+                            onClick = { fullscreenImagePath = selectedEntry.imagePath },
+                            onLongClick = { shareQrImage(context, selectedEntry.imagePath) }
+                        ),
                         contentScale = ContentScale.Fit
                     )
                 } else {
@@ -2416,29 +2590,123 @@ private fun ReceiveQrScreen(
                     )
                 }
             }
-            QrInformationCard("Người nhận", selectedEntry.recipientName)
-            QrInformationCard("Số tài khoản", selectedEntry.accountNumber)
-            QrInformationCard("Ngân hàng", selectedEntry.bankName)
+            OutlinedButton(
+                onClick = {
+                    copyQrText(
+                        context,
+                        "${selectedEntry.accountNumber} - ${selectedEntry.bankName} - " +
+                            selectedEntry.recipientName,
+                        "Đã sao chép thông tin chuyển khoản"
+                    )
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Share, contentDescription = null)
+                Text("  Sao chép thông tin chuyển khoản")
+            }
+            QrInformationCard(
+                "Người nhận",
+                selectedEntry.recipientName,
+                onCopy = {
+                    copyQrText(context, selectedEntry.recipientName, "Đã sao chép tên người nhận")
+                }
+            )
+            QrInformationCard(
+                "Số tài khoản",
+                selectedEntry.accountNumber,
+                onCopy = {
+                    copyQrText(context, selectedEntry.accountNumber, "Đã sao chép số tài khoản")
+                }
+            )
+            QrInformationCard(
+                "Ngân hàng",
+                selectedEntry.bankName,
+                onCopy = {
+                    copyQrText(context, selectedEntry.bankName, "Đã sao chép tên ngân hàng")
+                }
+            )
             OutlinedButton(onClick = onManage) {
                 Icon(Icons.Default.Edit, contentDescription = null)
                 Text("  Quản lý mã QR")
             }
         }
     }
+    fullscreenImagePath?.let { imagePath ->
+        Dialog(
+            onDismissRequest = { fullscreenImagePath = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black).combinedClickable(
+                    onClick = { fullscreenImagePath = null },
+                    onLongClick = { shareQrImage(context, imagePath) }
+                ),
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(
+                    model = File(imagePath),
+                    contentDescription = "Mã QR toàn màn hình",
+                    modifier = Modifier.fillMaxSize().padding(12.dp),
+                    contentScale = ContentScale.Fit
+                )
+                Text(
+                    "Nhấn để đóng · Nhấn giữ để chia sẻ",
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
 }
 
 @Composable
-private fun QrInformationCard(label: String, value: String) {
+private fun QrInformationCard(label: String, value: String, onCopy: () -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().combinedClickable(
+            onClick = {},
+            onLongClick = onCopy
+        ),
         colors = androidx.compose.material3.CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
         )
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium)
-            Text(value, style = MaterialTheme.typography.titleMedium)
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Text(value, style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Text("Nhấn giữ để sao chép", style = MaterialTheme.typography.labelSmall)
         }
+    }
+}
+
+private fun copyQrText(context: Context, value: String, message: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+        as android.content.ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("Thông tin chuyển khoản", value))
+    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+}
+
+private fun shareQrImage(context: Context, imagePath: String) {
+    try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            File(imagePath)
+        )
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newUri(context.contentResolver, "Mã QR", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Chia sẻ ảnh mã QR"))
+    } catch (failure: IllegalArgumentException) {
+        Toast.makeText(context, "Không tìm thấy ảnh mã QR để chia sẻ.", Toast.LENGTH_SHORT).show()
+    } catch (failure: android.content.ActivityNotFoundException) {
+        Toast.makeText(context, "Không có ứng dụng phù hợp để chia sẻ ảnh.", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -2546,6 +2814,7 @@ private fun QrEntryDialog(
     initialEntry: ReceiveQrEntry?,
     imagePath: String?,
     onPickImage: () -> Unit,
+    onCaptureImage: () -> Unit,
     onSave: (recipient: String, account: String, bank: String, imagePath: String?) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2596,6 +2865,10 @@ private fun QrEntryDialog(
                 OutlinedButton(onClick = onPickImage, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.PhotoLibrary, contentDescription = null)
                     Text(if (imagePath == null) "  Chọn ảnh mã QR" else "  Thay ảnh mã QR")
+                }
+                OutlinedButton(onClick = onCaptureImage, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.PhotoCamera, contentDescription = null)
+                    Text("  Chụp ảnh mã QR")
                 }
                 OutlinedTextField(
                     value = recipient,
@@ -2655,17 +2928,30 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
                 "HIDE_PRODUCT",
                 "PARTIAL_HIDE",
                 "RESTORE_PRODUCT",
-                "DELETE_PRODUCT"
+                "ARCHIVE_STOCK",
+                "RESTORE_ARCHIVE",
+                "UNHIDE_STOCK",
+                "DELETE_PRODUCT",
+                "DELETE_STOCK"
             )
             val movementIcon = when {
                 movement.productDeleted && movement.type in setOf(
                     "HIDE_PRODUCT",
-                    "DELETE_PRODUCT"
+                    "PARTIAL_HIDE",
+                    "ARCHIVE_STOCK",
+                    "RESTORE_ARCHIVE",
+                    "DELETE_PRODUCT",
+                    "DELETE_STOCK"
                 ) -> Icons.Default.Close
-                movement.type == "HIDE_PRODUCT" || movement.type == "PARTIAL_HIDE" ->
+                movement.type == "HIDE_PRODUCT" ||
+                    movement.type == "PARTIAL_HIDE" ||
+                    movement.type == "ARCHIVE_STOCK" ->
                     Icons.Default.VisibilityOff
-                movement.type == "RESTORE_PRODUCT" -> Icons.Default.Restore
-                movement.type == "DELETE_PRODUCT" -> Icons.Default.Close
+                movement.type == "RESTORE_PRODUCT" ||
+                    movement.type == "RESTORE_ARCHIVE" ||
+                    movement.type == "UNHIDE_STOCK" -> Icons.Default.Restore
+                movement.type == "DELETE_PRODUCT" || movement.type == "DELETE_STOCK" ->
+                    Icons.Default.Close
                 isIncoming -> Icons.Default.ArrowDownward
                 else -> Icons.Default.ArrowUpward
             }
@@ -2676,11 +2962,21 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
                         contentDescription = null,
                         tint = when {
                             movement.type == "DELETE_PRODUCT" ||
-                                (movement.productDeleted && movement.type == "HIDE_PRODUCT") ->
+                                movement.type == "DELETE_STOCK" ||
+                                movement.productDeleted && movement.type in setOf(
+                                    "HIDE_PRODUCT",
+                                    "PARTIAL_HIDE",
+                                    "ARCHIVE_STOCK",
+                                    "RESTORE_ARCHIVE"
+                                ) ->
                                 MaterialTheme.colorScheme.error
-                            movement.type == "HIDE_PRODUCT" || movement.type == "PARTIAL_HIDE" ->
+                            movement.type == "HIDE_PRODUCT" ||
+                                movement.type == "PARTIAL_HIDE" ||
+                                movement.type == "ARCHIVE_STOCK" ->
                                 MaterialTheme.colorScheme.tertiary
-                            movement.type == "RESTORE_PRODUCT" ->
+                            movement.type == "RESTORE_PRODUCT" ||
+                                movement.type == "RESTORE_ARCHIVE" ||
+                                movement.type == "UNHIDE_STOCK" ->
                                 MaterialTheme.colorScheme.primary
                             isIncoming -> MaterialTheme.colorScheme.primary
                             else -> MaterialTheme.colorScheme.error
@@ -2697,7 +2993,16 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    if (movement.type == "PARTIAL_HIDE" || !isLifecycle) {
+                    if (
+                        movement.type in setOf("DELETE_PRODUCT", "DELETE_STOCK") ||
+                        (movement.productDeleted && movement.type in setOf(
+                            "HIDE_PRODUCT",
+                            "PARTIAL_HIDE",
+                            "ARCHIVE_STOCK",
+                            "RESTORE_ARCHIVE"
+                        )) ||
+                        !isLifecycle
+                    ) {
                         Text(
                             "${if (isIncoming) "+" else ""}${quantity(movement.quantityDelta)}",
                             color = if (isIncoming) MaterialTheme.colorScheme.primary
@@ -2722,10 +3027,14 @@ private fun stockMovementTitle(type: String): String = when (type) {
     "RESTORE" -> "Khôi phục tồn"
     "SALE" -> "Bán hàng"
     "CANCEL_SALE" -> "Hủy đơn, hoàn kho"
-    "HIDE_PRODUCT" -> "Ẩn sản phẩm"
+    "HIDE_PRODUCT" -> "Ẩn toàn bộ tồn kho"
     "PARTIAL_HIDE" -> "Ẩn một phần tồn kho"
+    "ARCHIVE_STOCK" -> "Ẩn tồn kho"
     "RESTORE_PRODUCT" -> "Khôi phục sản phẩm"
+    "RESTORE_ARCHIVE" -> "Khôi phục tồn kho đã ẩn"
+    "UNHIDE_STOCK" -> "Khôi phục tồn kho đã ẩn"
     "DELETE_PRODUCT" -> "Đã xóa sản phẩm"
+    "DELETE_STOCK" -> "Xóa tồn kho"
     else -> type
 }
 
@@ -3088,6 +3397,28 @@ private fun productStockColor(product: Product, filter: StockUnitFilter): Color 
     }
 }
 
+private fun archiveDaysRemaining(archivedAt: Long): Int {
+    val today = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    val archiveDate = Calendar.getInstance().apply {
+        timeInMillis = archivedAt
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    var days = 0
+    while (archiveDate.before(today) && days < 30) {
+        archiveDate.add(Calendar.DAY_OF_YEAR, 1)
+        days++
+    }
+    return (30 - days).coerceAtLeast(0)
+}
+
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun Inventory(
@@ -3103,7 +3434,12 @@ private fun Inventory(
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     scrollToProductId: String? = null,
-    onProductScrolled: () -> Unit = {}
+    onProductScrolled: () -> Unit = {},
+    archivedSelectionMode: Boolean = false,
+    selectedArchivedProductIds: Set<String> = emptySet(),
+    onArchiveSelectionModeChange: (Boolean) -> Unit = {},
+    onArchivedSelectionChange: (Set<String>) -> Unit = {},
+    onDeleteArchivedProduct: (String) -> Unit = {}
 ) {
     var receivingBranch by remember { mutableStateOf<UnitBranch?>(null) }
     var editingPriceBranch by remember { mutableStateOf<UnitBranch?>(null) }
@@ -3155,10 +3491,37 @@ private fun Inventory(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                if (recentOnly) "Sản phẩm gần đây" else "Sản phẩm",
+                when {
+                    recentOnly -> "Sản phẩm gần đây"
+                    productFilter == ProductFilter.ARCHIVED -> "Tồn kho đã ẩn"
+                    else -> "Sản phẩm"
+                },
                 style = MaterialTheme.typography.titleLarge
             )
             Text("${filtered.size} mặt hàng")
+        }
+        if (productFilter == ProductFilter.ARCHIVED && filtered.isNotEmpty()) {
+            TextButton(
+                onClick = {
+                    onArchiveSelectionModeChange(true)
+                    onArchivedSelectionChange(
+                        if (filtered.all { it.id in selectedArchivedProductIds }) {
+                            emptySet()
+                        } else {
+                            selectedArchivedProductIds + filtered.map { it.id }
+                        }
+                    )
+                },
+                modifier = Modifier.align(Alignment.End)
+            ) {
+                Text(
+                    if (filtered.all { it.id in selectedArchivedProductIds }) {
+                        "Bỏ chọn tất cả"
+                    } else {
+                        "Chọn tất cả"
+                    }
+                )
+            }
         }
         if (filtered.isEmpty()) {
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -3187,6 +3550,24 @@ private fun Inventory(
                         product = product,
                         expanded = product.id in expandedProductIds,
                         archived = productFilter == ProductFilter.ARCHIVED,
+                        selectionMode = archivedSelectionMode,
+                        selected = product.id in selectedArchivedProductIds,
+                        onToggleSelection = {
+                            onArchiveSelectionModeChange(true)
+                            onArchivedSelectionChange(
+                                if (product.id in selectedArchivedProductIds) {
+                                    selectedArchivedProductIds - product.id
+                                } else {
+                                    selectedArchivedProductIds + product.id
+                                }
+                            )
+                        },
+                        onLongPress = {
+                            if (productFilter == ProductFilter.ARCHIVED) {
+                                onArchiveSelectionModeChange(true)
+                                onArchivedSelectionChange(selectedArchivedProductIds + product.id)
+                            }
+                        },
                         onExpand = {
                             expandedProductIds = if (product.id in expandedProductIds) {
                                 expandedProductIds - product.id
@@ -3198,7 +3579,13 @@ private fun Inventory(
                         onEdit = { editingProduct = product },
                         onHide = { hidingProduct = product },
                         onRestore = { vm.reactivateProduct(product.id) },
-                        onDelete = { deletingProduct = product },
+                        onDelete = {
+                            if (productFilter == ProductFilter.ARCHIVED) {
+                                onDeleteArchivedProduct(product.id)
+                            } else {
+                                deletingProduct = product
+                            }
+                        },
                         onReceive = { receivingBranch = it },
                         onEditPrice = { editingPriceBranch = it },
                         onAddUnit = { addingUnitProduct = product },
@@ -3250,9 +3637,9 @@ private fun Inventory(
     hidingProduct?.let { product ->
         AlertDialog(
             onDismissRequest = { hidingProduct = null },
-            title = { DialogTitleWithClose("Ẩn sản phẩm?") { hidingProduct = null } },
+            title = { DialogTitleWithClose("Ẩn tồn kho?") { hidingProduct = null } },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
                         "“${product.name}” sẽ không còn trong danh sách bán hàng. " +
                             "Lịch sử đơn hàng và tồn kho được giữ lại."
@@ -3266,14 +3653,18 @@ private fun Inventory(
                     ) {
                         Text("Ẩn một phần tồn kho")
                     }
+                    Button(
+                        onClick = {
+                            vm.deactivateProduct(product.id)
+                            hidingProduct = null
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Ẩn toàn bộ tồn kho")
+                    }
                 }
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    vm.deactivateProduct(product.id)
-                    hidingProduct = null
-                }) { Text("Ẩn sản phẩm") }
-            }
+            confirmButton = {}
         )
     }
     partiallyHidingProduct?.let { product ->
@@ -3419,6 +3810,10 @@ private fun ProductGridCard(
     product: Product,
     expanded: Boolean,
     archived: Boolean,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onToggleSelection: () -> Unit,
+    onLongPress: () -> Unit,
     onExpand: () -> Unit,
     onImageClick: () -> Unit,
     onEdit: () -> Unit,
@@ -3445,12 +3840,43 @@ private fun ProductGridCard(
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .clickable(enabled = product.imagePath != null, onClick = onImageClick)
+                .pointerInput(product.id, archived, selectionMode) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val downAt = SystemClock.uptimeMillis()
+                        var longPressed = false
+                        var finished = false
+                        while (!finished) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || !change.pressed) {
+                                if (!longPressed) {
+                                    if (selectionMode) onToggleSelection()
+                                    else if (product.imagePath != null) onImageClick()
+                                }
+                                finished = true
+                            } else if (
+                                archived &&
+                                !longPressed &&
+                                SystemClock.uptimeMillis() - downAt >= 2_000L
+                            ) {
+                                longPressed = true
+                                onLongPress()
+                                change.consume()
+                            } else if (longPressed) {
+                                change.consume()
+                            }
+                        }
+                    }
+                }
         ) {
             ProductImage(product.imagePath, Modifier.fillMaxSize())
             primaryBranch?.let { branch ->
                 Text(
-                    quantity(branch.stock, branch.unitType),
+                    quantity(
+                        if (archived) branch.archivedStock else branch.stock,
+                        branch.unitType
+                    ),
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(6.dp)
@@ -3464,12 +3890,31 @@ private fun ProductGridCard(
                     style = MaterialTheme.typography.labelLarge
                 )
             }
+            if (archived && selectionMode) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+                    shape = CircleShape,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                ) {
+                    Icon(
+                        if (selected) Icons.Default.Check else Icons.Default.CheckBoxOutlineBlank,
+                        contentDescription = if (selected) "Đã chọn" else "Chưa chọn",
+                        modifier = Modifier.padding(4.dp).size(20.dp),
+                        tint = if (selected) MaterialTheme.colorScheme.onPrimary
+                        else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(
             product.name,
             style = MaterialTheme.typography.titleSmall,
-            maxLines = 1
+            maxLines = 1,
+            modifier = Modifier.clickable(enabled = archived && selectionMode) {
+                onToggleSelection()
+            }
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3511,11 +3956,20 @@ private fun ProductGridCard(
                 )
             }
             if (archived) {
-                IconButton(onClick = onRestore, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Default.Restore, contentDescription = "Khôi phục")
-                }
-                IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Default.DeleteForever, contentDescription = "Xóa hẳn")
+                if (selectionMode) {
+                    IconButton(onClick = onToggleSelection, modifier = Modifier.size(34.dp)) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = if (selected) "Bỏ chọn" else "Chọn"
+                        )
+                    }
+                } else {
+                    IconButton(onClick = onRestore, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Restore, contentDescription = "Khôi phục")
+                    }
+                    IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.DeleteForever, contentDescription = "Xóa hẳn")
+                    }
                 }
             } else {
                 IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) {
@@ -3528,13 +3982,7 @@ private fun ProductGridCard(
         }
             if (expanded) {
                 if (archived) {
-                    val dayMillis = 24L * 60 * 60 * 1000
-                    val daysRemaining = product.archivedAt?.let { archivedAt ->
-                        val remaining = (
-                            archivedAt + 30L * dayMillis - System.currentTimeMillis()
-                            ).coerceAtLeast(0L)
-                        ((remaining + dayMillis - 1) / dayMillis).toInt()
-                    } ?: 30
+                    val daysRemaining = product.archivedAt?.let(::archiveDaysRemaining) ?: 30
                     Text(
                         if (daysRemaining == 0) {
                             "Sản phẩm sẽ được tự động xóa trong hôm nay."
@@ -3544,6 +3992,17 @@ private fun ProductGridCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
+                    product.branches.forEach { branch ->
+                        if (branch.archivedStock > 0.0) {
+                            Text(
+                                "${branch.name} đã ẩn: ${quantity(branch.archivedStock, branch.unitType)}" +
+                                    if (branch.stock > 0.0) {
+                                        " · còn trong kho: ${quantity(branch.stock, branch.unitType)}"
+                                    } else "",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                 } else {
                     product.branches.forEach { branch ->
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -3664,6 +4123,10 @@ private fun ProductImageViewer(product: Product, onDismiss: () -> Unit) {
     var scale by remember(product.id, imageIndex) { mutableFloatStateOf(1f) }
     var pan by remember(product.id, imageIndex) { mutableStateOf(Offset.Zero) }
     var showDetails by remember(product.id) { mutableStateOf(false) }
+    LaunchedEffect(imageIndex) {
+        scale = 1f
+        pan = Offset.Zero
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -5613,7 +6076,10 @@ private fun ProductDialog(
     var buyPrice by remember(product?.id) { mutableStateOf("0") }
     var sellPrice by remember(product?.id) { mutableStateOf("0") }
     var imagePaths by remember(product?.id) {
-        mutableStateOf(listOfNotNull(product?.imagePath) + product?.additionalImagePaths.orEmpty())
+        mutableStateOf(
+            (listOfNotNull(product?.imagePath) + product?.additionalImagePaths.orEmpty())
+                .take(10)
+        )
     }
     var error by remember { mutableStateOf<String?>(null) }
     var savingImage by remember { mutableStateOf(false) }
@@ -5656,7 +6122,7 @@ private fun ProductDialog(
                 val savedPath = withContext(Dispatchers.IO) {
                     persistProductImage(context, null, bitmap, sourceSize)
                 }
-                imagePaths = (imagePaths + savedPath).distinct().take(11)
+                imagePaths = (imagePaths + savedPath).distinct().take(10)
                 createdImagePaths = createdImagePaths + savedPath
                 error = null
                 onSaved()
@@ -5669,8 +6135,8 @@ private fun ProductDialog(
     }
 
     fun prepareProductImages(uris: List<Uri>) {
-        if (imagePaths.size + uris.size > 11) {
-            error = "Mỗi sản phẩm có thể có tối đa 11 ảnh."
+        if (imagePaths.size + uris.size > 10) {
+            error = "Mỗi sản phẩm có thể có tối đa 10 ảnh, tính cả ảnh chính."
             return
         }
         pendingImageUris = uris
@@ -5706,8 +6172,8 @@ private fun ProductDialog(
         prepareProductImages(uris)
     }
     fun captureImage() {
-        if (imagePaths.size >= 11) {
-            error = "Mỗi sản phẩm có thể có tối đa 11 ảnh."
+        if (imagePaths.size >= 10) {
+            error = "Mỗi sản phẩm có thể có tối đa 10 ảnh, tính cả ảnh chính."
             return
         }
         try {
@@ -5752,7 +6218,7 @@ private fun ProductDialog(
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         OutlinedButton(
                             onClick = { galleryPicker.launch("image/*") },
-                            enabled = !savingImage && imagePaths.size < 11
+                            enabled = !savingImage && imagePaths.size < 10
                         ) {
                             Icon(Icons.Default.PhotoLibrary, contentDescription = null)
                             Spacer(Modifier.size(8.dp))
@@ -5760,14 +6226,14 @@ private fun ProductDialog(
                         }
                         OutlinedButton(
                             onClick = { captureImage() },
-                            enabled = !savingImage && imagePaths.size < 11
+                            enabled = !savingImage && imagePaths.size < 10
                         ) {
                             Icon(Icons.Default.PhotoCamera, contentDescription = null)
-                            Text("Chụp ảnh")
+                            Text("Thêm ảnh chụp")
                         }
                     }
                 }
-                Text("Danh sách ảnh (${imagePaths.size}/11) · nhấn giữ để sắp xếp", style = MaterialTheme.typography.titleSmall)
+                Text("Danh sách ảnh (${imagePaths.size}/10) · nhấn giữ để sắp xếp", style = MaterialTheme.typography.titleSmall)
                 if (imagePaths.isNotEmpty()) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(imagePaths, key = { it }) { path ->

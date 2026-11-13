@@ -26,8 +26,7 @@ import org.json.JSONArray
 import java.io.IOException
 import java.io.File
 import java.util.UUID
-
-private const val ARCHIVE_RETENTION_MILLIS = 30L * 24 * 60 * 60 * 1000
+import java.util.Calendar
 
 @Entity(tableName = "products")
 data class ProductRecord(
@@ -41,7 +40,9 @@ data class ProductRecord(
     val deletedAt: Long? = null,
     val unitSummaryLabel: String = "loại",
     @ColumnInfo(defaultValue = "'[]'")
-    val additionalImagePaths: String = "[]"
+    val additionalImagePaths: String = "[]",
+    @ColumnInfo(defaultValue = "0")
+    val preDeleteActive: Boolean = false
 )
 
 @Entity(
@@ -62,7 +63,9 @@ data class UnitBranchRecord(
     val stock: Double,
     val buyPrice: Long,
     val sellPrice: Long,
-    val lowStockThreshold: Double
+    val lowStockThreshold: Double,
+    @ColumnInfo(defaultValue = "0")
+    val archivedStock: Double = 0.0
 )
 
 @Entity(
@@ -245,7 +248,12 @@ interface KhoDao {
     fun observeProducts(): Flow<List<ProductWithBranches>>
 
     @Transaction
-    @Query("SELECT * FROM products WHERE active = 0 AND permanentlyDeleted = 0 ORDER BY name COLLATE NOCASE")
+    @Query(
+        "SELECT * FROM products WHERE permanentlyDeleted = 0 AND " +
+            "(active = 0 OR EXISTS (SELECT 1 FROM unit_branches b " +
+            "WHERE b.productId = products.id AND b.archivedStock > 0)) " +
+            "ORDER BY name COLLATE NOCASE"
+    )
     fun observeArchivedProducts(): Flow<List<ProductWithBranches>>
 
     @Query("SELECT * FROM products WHERE id = :id LIMIT 1")
@@ -262,6 +270,12 @@ interface KhoDao {
 
     @Query("SELECT * FROM products WHERE permanentlyDeleted = 0")
     suspend fun getProductsForPermanentDeletion(): List<ProductRecord>
+
+    @Query(
+        "SELECT id FROM products WHERE permanentlyDeleted = 1 " +
+            "AND deletedAt IS NOT NULL AND deletedAt <= :cutoff"
+    )
+    suspend fun getExpiredPendingDeletionIds(cutoff: Long): List<String>
 
     @Query("SELECT imagePath FROM products WHERE imagePath IS NOT NULL")
     suspend fun getProductImagePaths(): List<String>
@@ -288,6 +302,7 @@ interface KhoDao {
             "FROM stock_movements m " +
             "INNER JOIN unit_branches b ON b.id = m.branchId " +
             "INNER JOIN products p ON p.id = b.productId " +
+            "WHERE m.type != 'UNHIDE_STOCK' " +
             "ORDER BY m.happenedAt DESC"
     )
     fun observeStockMovements(): Flow<List<StockMovementView>>
@@ -298,15 +313,15 @@ interface KhoDao {
     @Query("SELECT * FROM sales_order_lines WHERE orderId = :orderId")
     suspend fun getOrderLines(orderId: String): List<SalesOrderLineRecord>
 
-    @Query("UPDATE sales_order_lines SET productDeleted = 1 WHERE branchId IN (:branchIds)")
-    suspend fun markOrderLinesProductDeleted(branchIds: List<String>)
+    @Query("UPDATE sales_order_lines SET productDeleted = :deleted WHERE branchId IN (:branchIds)")
+    suspend fun setOrderLinesProductDeleted(branchIds: List<String>, deleted: Boolean)
 
     @Query(
-        "UPDATE sales_order_lines SET productDeleted = 1 WHERE branchId IN " +
+        "UPDATE sales_order_lines SET productDeleted = :deleted WHERE branchId IN " +
             "(SELECT id FROM unit_branches WHERE productId IN " +
             "(SELECT id FROM products WHERE permanentlyDeleted = 0))"
     )
-    suspend fun markAllOrderLinesProductsDeleted()
+    suspend fun setAllOrderLinesProductsDeleted(deleted: Boolean)
 
     @Query("SELECT * FROM order_line_batch_allocations WHERE orderLineId = :lineId")
     suspend fun getAllocations(lineId: String): List<OrderLineBatchAllocationRecord>
@@ -338,24 +353,77 @@ interface KhoDao {
     suspend fun reactivateProduct(productId: String)
 
     @Query(
-        "UPDATE products SET active = 0, permanentlyDeleted = 1, archivedAt = NULL, " +
-            "deletedAt = :deletedAt, imagePath = NULL, " +
-            "additionalImagePaths = '[]' WHERE id = :productId"
+        "UPDATE products SET preDeleteActive = active, active = 0, " +
+            "permanentlyDeleted = 1, deletedAt = :deletedAt WHERE id = :productId"
     )
     suspend fun permanentlyDeleteProduct(productId: String, deletedAt: Long)
 
     @Query(
-        "UPDATE products SET active = 0, permanentlyDeleted = 1, archivedAt = NULL, " +
-            "deletedAt = :deletedAt, imagePath = NULL, " +
-            "additionalImagePaths = '[]' WHERE permanentlyDeleted = 0"
+        "UPDATE products SET preDeleteActive = active, active = 0, " +
+            "permanentlyDeleted = 1, deletedAt = :deletedAt WHERE permanentlyDeleted = 0"
     )
     suspend fun permanentlyDeleteAllProducts(deletedAt: Long)
 
     @Query(
-        "SELECT * FROM products WHERE active = 0 AND permanentlyDeleted = 0 " +
-            "AND archivedAt IS NOT NULL AND archivedAt <= :cutoff"
+        "SELECT * FROM products WHERE permanentlyDeleted = 0 AND archivedAt IS NOT NULL " +
+            "AND archivedAt <= :cutoff AND (active = 0 OR EXISTS " +
+            "(SELECT 1 FROM unit_branches b WHERE b.productId = products.id AND b.archivedStock > 0))"
     )
     suspend fun getExpiredArchivedProducts(cutoff: Long): List<ProductRecord>
+
+    @Query("UPDATE products SET active = preDeleteActive, permanentlyDeleted = 0, deletedAt = NULL, preDeleteActive = 0 WHERE id = :productId")
+    suspend fun undoPermanentDelete(productId: String)
+
+    @Query("UPDATE products SET imagePath = NULL, additionalImagePaths = '[]' WHERE id = :productId")
+    suspend fun clearDeletedProductImages(productId: String)
+
+    @Query("UPDATE products SET permanentlyDeleted = 0, deletedAt = NULL, active = 1, archivedAt = NULL WHERE id = :productId")
+    suspend fun restoreExpiredProduct(productId: String)
+
+    @Query("UPDATE products SET archivedAt = :archivedAt WHERE id = :productId")
+    suspend fun updateArchivedAt(productId: String, archivedAt: Long)
+
+    @Query("UPDATE unit_branches SET archivedStock = archivedStock + :delta WHERE id = :branchId")
+    suspend fun adjustArchivedStock(branchId: String, delta: Double)
+
+    @Query("UPDATE unit_branches SET stock = 0, archivedStock = 0 WHERE productId = :productId")
+    suspend fun clearProductStock(productId: String)
+
+    @Query("UPDATE stock_batches SET quantityRemaining = 0 WHERE branchId IN (SELECT id FROM unit_branches WHERE productId = :productId)")
+    suspend fun clearProductBatchStock(productId: String)
+
+    @Query(
+        "SELECT * FROM stock_movements WHERE branchId = :branchId " +
+            "AND type = 'ARCHIVE_STOCK' AND referenceId = :referenceId LIMIT 1"
+    )
+    suspend fun getArchiveMovement(branchId: String, referenceId: String): StockMovementRecord?
+
+    @Query("UPDATE stock_movements SET quantityDelta = :quantityDelta WHERE id = :movementId")
+    suspend fun updateMovementQuantity(movementId: String, quantityDelta: Double)
+
+    @Query(
+        "UPDATE stock_movements SET type = :newType WHERE " +
+            "type IN ('ARCHIVE_STOCK', 'RESTORE_ARCHIVE', 'HIDE_PRODUCT', 'PARTIAL_HIDE') AND " +
+            "(referenceId = :productId OR referenceId LIKE :archivePrefix)"
+    )
+    suspend fun updateArchiveMovementType(
+        productId: String,
+        archivePrefix: String,
+        newType: String
+    )
+
+    @Query(
+        "UPDATE stock_movements SET type = 'ARCHIVE_STOCK' " +
+            "WHERE type = 'DELETE_PRODUCT' AND " +
+            "(referenceId = :productId OR referenceId LIKE :archivePrefix)"
+    )
+    suspend fun restoreArchiveMovementType(productId: String, archivePrefix: String)
+
+    @Query(
+        "DELETE FROM stock_movements WHERE type = 'DELETE_PRODUCT' " +
+            "AND referenceId LIKE :deletePrefix"
+    )
+    suspend fun deleteUndoableDeleteMovements(deletePrefix: String)
 
     @Insert
     suspend fun insertBranch(branch: UnitBranchRecord)
@@ -420,7 +488,7 @@ interface KhoDao {
         OrderLineBatchAllocationRecord::class,
         OrderPaymentRecord::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class KhoDatabase : RoomDatabase() {
@@ -470,6 +538,177 @@ abstract class KhoDatabase : RoomDatabase() {
                 )
             }
         }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE unit_branches ADD COLUMN archivedStock REAL NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE products ADD COLUMN preDeleteActive INTEGER NOT NULL DEFAULT 0"
+                )
+                migrateLegacyArchivedStock(db)
+                db.execSQL(
+                    """
+                    UPDATE unit_branches SET stock = 0 WHERE productId IN (
+                        SELECT id FROM products WHERE active = 0 AND permanentlyDeleted = 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE stock_batches SET quantityRemaining = 0 WHERE branchId IN (
+                        SELECT b.id FROM unit_branches b
+                        INNER JOIN products p ON p.id = b.productId
+                        WHERE p.active = 0 AND p.permanentlyDeleted = 0
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        private fun migrateLegacyArchivedStock(db: SupportSQLiteDatabase) {
+            data class ArchiveKey(val branchId: String, val dayStart: Long)
+            data class ArchiveGroup(
+                val productId: String,
+                var quantityDelta: Double,
+                var happenedAt: Long
+            )
+
+            val activeByProduct = mutableMapOf<String, Boolean>()
+            val archivedAtByProduct = mutableMapOf<String, Long>()
+            val permanentlyDeletedProducts = mutableSetOf<String>()
+            db.query(
+                "SELECT id, active, permanentlyDeleted, archivedAt FROM products"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val productId = cursor.getString(0)
+                    activeByProduct[productId] = cursor.getInt(1) != 0
+                    if (cursor.getInt(2) != 0) permanentlyDeletedProducts += productId
+                    if (!cursor.isNull(3)) archivedAtByProduct[productId] = cursor.getLong(3)
+                }
+            }
+
+            val groups = mutableMapOf<ArchiveKey, ArchiveGroup>()
+            val latestArchiveAt = mutableMapOf<String, Long>()
+            val latestPartialHideAt = mutableMapOf<String, Long>()
+            val legacyMovementIds = mutableListOf<String>()
+            db.query(
+                "SELECT m.id, m.branchId, b.productId, m.type, " +
+                    "m.quantityDelta, m.happenedAt " +
+                    "FROM stock_movements m INNER JOIN unit_branches b ON b.id = m.branchId " +
+                    "WHERE m.type IN ('PARTIAL_HIDE', 'HIDE_PRODUCT')"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val movementId = cursor.getString(0)
+                    val branchId = cursor.getString(1)
+                    val productId = cursor.getString(2)
+                    val type = cursor.getString(3)
+                    val quantityDelta = cursor.getDouble(4)
+                    val happenedAt = cursor.getLong(5)
+                    if (productId in permanentlyDeletedProducts) continue
+                    latestArchiveAt[productId] = maxOf(
+                        latestArchiveAt[productId] ?: Long.MIN_VALUE,
+                        happenedAt
+                    )
+                    if (type == "HIDE_PRODUCT" && activeByProduct[productId] == true) {
+                        continue
+                    }
+                    legacyMovementIds += movementId
+                    if (type != "PARTIAL_HIDE") continue
+                    latestPartialHideAt[productId] = maxOf(
+                        latestPartialHideAt[productId] ?: Long.MIN_VALUE,
+                        happenedAt
+                    )
+
+                    val key = ArchiveKey(branchId, archiveDayStart(happenedAt))
+                    val group = groups[key]
+                    if (group == null) {
+                        groups[key] = ArchiveGroup(productId, quantityDelta, happenedAt)
+                    } else {
+                        group.quantityDelta += quantityDelta
+                        group.happenedAt = minOf(group.happenedAt, happenedAt)
+                    }
+                }
+            }
+
+            db.query(
+                "SELECT b.id, b.productId, b.stock FROM unit_branches b " +
+                    "INNER JOIN products p ON p.id = b.productId " +
+                    "WHERE p.active = 0 AND p.permanentlyDeleted = 0 AND b.stock > 0"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val branchId = cursor.getString(0)
+                    val productId = cursor.getString(1)
+                    val hiddenAt = latestArchiveAt[productId]
+                        ?: archivedAtByProduct[productId]
+                        ?: System.currentTimeMillis()
+                    val key = ArchiveKey(branchId, archiveDayStart(hiddenAt))
+                    val group = groups[key]
+                    if (group == null) {
+                        groups[key] = ArchiveGroup(productId, -cursor.getDouble(2), hiddenAt)
+                    } else {
+                        group.quantityDelta -= cursor.getDouble(2)
+                        group.happenedAt = minOf(group.happenedAt, hiddenAt)
+                    }
+                }
+            }
+
+            val archivedByBranch = mutableMapOf<String, Double>()
+            val archivedByProduct = mutableMapOf<String, Double>()
+            groups.forEach { (key, group) ->
+                val values = android.content.ContentValues().apply {
+                    put("id", UUID.randomUUID().toString())
+                    put("branchId", key.branchId)
+                    put("type", "ARCHIVE_STOCK")
+                    put("quantityDelta", group.quantityDelta)
+                    put("happenedAt", group.happenedAt)
+                    put("referenceId", "ARCHIVE:${group.productId}:${key.dayStart}")
+                    put("syncStatus", "PENDING")
+                }
+                db.insert(
+                    "stock_movements",
+                    android.database.sqlite.SQLiteDatabase.CONFLICT_ABORT,
+                    values
+                )
+                val quantity = (-group.quantityDelta).coerceAtLeast(0.0)
+                archivedByBranch[key.branchId] =
+                    (archivedByBranch[key.branchId] ?: 0.0) + quantity
+                archivedByProduct[group.productId] =
+                    (archivedByProduct[group.productId] ?: 0.0) + quantity
+            }
+            legacyMovementIds.forEach { movementId ->
+                db.delete("stock_movements", "id = ?", arrayOf(movementId))
+            }
+            archivedByBranch.forEach { (branchId, quantity) ->
+                db.execSQL(
+                    "UPDATE unit_branches SET archivedStock = ? WHERE id = ?",
+                    arrayOf(quantity, branchId)
+                )
+            }
+            activeByProduct.forEach { (productId, active) ->
+                if (productId in permanentlyDeletedProducts) return@forEach
+                val archivedAt = when {
+                    !active -> latestArchiveAt[productId]
+                        ?: archivedAtByProduct[productId]
+                        ?: System.currentTimeMillis()
+                    (archivedByProduct[productId] ?: 0.0) > 0.0 ->
+                        latestPartialHideAt[productId] ?: archivedAtByProduct[productId]
+                    else -> null
+                }
+                if (archivedAt == null) {
+                    db.execSQL(
+                        "UPDATE products SET archivedAt = NULL WHERE id = ?",
+                        arrayOf(productId)
+                    )
+                } else {
+                    db.execSQL(
+                        "UPDATE products SET archivedAt = ? WHERE id = ?",
+                        arrayOf(archivedAt, productId)
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -491,7 +730,8 @@ class LocalStore(
         KhoDatabase.MIGRATION_2_3,
         KhoDatabase.MIGRATION_3_4,
         KhoDatabase.MIGRATION_4_5,
-        KhoDatabase.MIGRATION_5_6
+        KhoDatabase.MIGRATION_5_6,
+        KhoDatabase.MIGRATION_6_7
     ).build()
 
     val products: Flow<List<Product>> =
@@ -532,18 +772,22 @@ class LocalStore(
             val existingProducts = dao.getAllProducts().associateBy { it.id }
             val mergedProducts = snapshot.products.map { product ->
                 val localProduct = existingProducts[product.id]
-                if (product.permanentlyDeleted && localProduct != null) {
+                val finalDeletionComplete = product.permanentlyDeleted &&
+                    (product.deletedAt ?: Long.MAX_VALUE) <= System.currentTimeMillis() - 5_000L
+                if (finalDeletionComplete && localProduct != null) {
                     deletedImagePaths += listOfNotNull(localProduct.imagePath) +
                         localProduct.additionalImagePaths.decodeImagePaths()
                 }
                 product.copy(
-                    imagePath = if (product.permanentlyDeleted) null
+                    imagePath = if (finalDeletionComplete) null
                     else localProduct?.imagePath,
-                    additionalImagePaths = if (product.permanentlyDeleted) "[]"
+                    additionalImagePaths = if (finalDeletionComplete) "[]"
                     else localProduct?.additionalImagePaths ?: "[]"
                 )
             }
-            val movementTotals = snapshot.movements.groupBy { it.branchId }
+            val movementTotals = snapshot.movements
+                .filterNot { it.type == "DELETE_PRODUCT" }
+                .groupBy { it.branchId }
                 .mapValues { (_, movements) -> movements.sumOf { it.quantityDelta } }
             val mergedBranches = snapshot.branches.map { branch ->
                 branch.copy(stock = movementTotals[branch.id] ?: branch.stock)
@@ -566,11 +810,14 @@ class LocalStore(
             }.toMutableMap()
             val nonSaleDeductions = snapshot.movements
                 .filter {
-                    it.type == "PARTIAL_HIDE" ||
+                    it.type in setOf("PARTIAL_HIDE", "ARCHIVE_STOCK", "RESTORE_ARCHIVE", "UNHIDE_STOCK") ||
+                        it.type == "DELETE_STOCK" ||
                         (it.type == "RESTORE" && it.quantityDelta < 0.0)
                 }
                 .groupBy { it.branchId }
-                .mapValues { (_, movements) -> movements.sumOf { -it.quantityDelta } }
+                .mapValues { (_, movements) ->
+                    movements.sumOf { -it.quantityDelta }.coerceAtLeast(0.0)
+                }
             snapshot.batches.groupBy { it.branchId }.forEach { (branchId, batches) ->
                 var remainingToDeduct = nonSaleDeductions[branchId] ?: 0.0
                 for (batch in batches.sortedWith(compareBy<StockBatchRecord> { it.receivedAt }
@@ -723,6 +970,9 @@ class LocalStore(
         require(buyPrice >= 0L) { "Giá nhập không hợp lệ." }
         require(sellPrice >= 0L) { "Giá bán không hợp lệ." }
         require(unitType != UnitType.OTHER) { "Chọn đơn vị Cái hoặc Kg." }
+        require((if (imagePath == null) 0 else 1) + additionalImagePaths.size <= 10) {
+            "Mỗi sản phẩm có thể có tối đa 10 ảnh, tính cả ảnh chính."
+        }
         if (unitType == UnitType.PIECE) {
             require(openingStock % 1.0 == 0.0) { "Số lượng Cái phải là số nguyên." }
         }
@@ -812,6 +1062,9 @@ class LocalStore(
             val oldImages = listOfNotNull(product.imagePath) + product.additionalImagePaths.decodeImagePaths()
             val retainedAdditionalImages =
                 additionalImagePaths ?: product.additionalImagePaths.decodeImagePaths()
+            require((if (imagePath == null) 0 else 1) + retainedAdditionalImages.size <= 10) {
+                "Mỗi sản phẩm có thể có tối đa 10 ảnh, tính cả ảnh chính."
+            }
             val retainedImages = listOfNotNull(imagePath) + retainedAdditionalImages
             dao.updateProduct(
                 productId,
@@ -841,8 +1094,20 @@ class LocalStore(
             val product = checkNotNull(dao.getProduct(productId)) { "Không tìm thấy sản phẩm." }
             check(!product.permanentlyDeleted) { "Sản phẩm đã bị xóa." }
             if (product.active) {
-                dao.deactivateProduct(productId, now)
-                recordProductEvent(dao, productId, "HIDE_PRODUCT", now)
+                val dayStart = archiveDayStart(now)
+                val archiveTime = product.archivedAt?.takeIf {
+                    archiveDayStart(it) == dayStart
+                } ?: dayStart
+                dao.deactivateProduct(productId, archiveTime)
+                dao.updateArchivedAt(productId, archiveTime)
+                for (branch in dao.getProductBranches(productId)) {
+                    val quantity = branch.stock
+                    if (quantity <= 0.0) continue
+                    removeAvailableBatches(dao, branch.id, quantity)
+                    dao.adjustStock(branch.id, -quantity)
+                    dao.adjustArchivedStock(branch.id, quantity)
+                    recordArchiveMovement(dao, productId, branch.id, quantity, now, dayStart)
+                }
             }
         }
     }
@@ -852,57 +1117,130 @@ class LocalStore(
             val dao = database.dao()
             val product = checkNotNull(dao.getProduct(productId)) { "Không tìm thấy sản phẩm." }
             check(!product.permanentlyDeleted) { "Sản phẩm đã bị xóa." }
-            val duplicate = dao.getActiveProducts().any {
+            val duplicate = !product.active && dao.getActiveProducts().any {
+                it.id != productId &&
                 normalizeProductName(it.name).equals(
                     normalizeProductName(product.name),
                     ignoreCase = true
                 )
             }
             require(!duplicate) { "Đã có sản phẩm đang dùng tên này." }
-            if (!product.active) {
+            val branches = dao.getProductBranches(productId)
+            branches.forEach { branch ->
+                val quantity = branch.archivedStock
+                if (quantity <= 0.0) return@forEach
                 val now = System.currentTimeMillis()
+                dao.adjustArchivedStock(branch.id, -quantity)
+                dao.adjustStock(branch.id, quantity)
+                dao.insertBatch(
+                    StockBatchRecord(
+                        id = UUID.randomUUID().toString(),
+                        branchId = branch.id,
+                        receivedAt = now,
+                        quantityReceived = quantity,
+                        quantityRemaining = quantity,
+                        unitCost = branch.buyPrice,
+                        approvalStatus = "APPROVED"
+                    )
+                )
+                dao.insertMovement(
+                    StockMovementRecord(
+                        id = UUID.randomUUID().toString(),
+                        branchId = branch.id,
+                        type = "UNHIDE_STOCK",
+                        quantityDelta = quantity,
+                        happenedAt = now,
+                        referenceId = productId,
+                        syncStatus = "PENDING"
+                    )
+                )
+            }
+            dao.updateArchiveMovementType(
+                productId,
+                "ARCHIVE:$productId:%",
+                "RESTORE_ARCHIVE"
+            )
+            if (!product.active || branches.any { it.archivedStock > 0.0 }) {
                 dao.reactivateProduct(productId)
-                recordProductEvent(dao, productId, "RESTORE_PRODUCT", now)
             }
         }
     }
 
     suspend fun permanentlyDeleteProduct(productId: String) {
-        var imagePaths: List<String> = emptyList()
         database.withTransaction {
             val dao = database.dao()
             val product = checkNotNull(dao.getProduct(productId)) { "Không tìm thấy sản phẩm." }
             if (!product.permanentlyDeleted) {
                 val now = System.currentTimeMillis()
-                val branchIds = dao.getProductBranches(productId).map { it.id }
-                dao.markOrderLinesProductDeleted(branchIds)
-                imagePaths =
-                    listOfNotNull(product.imagePath) + product.additionalImagePaths.decodeImagePaths()
-                recordProductEvent(dao, productId, "DELETE_PRODUCT", now)
                 dao.permanentlyDeleteProduct(productId, now)
             }
         }
-        deleteProductImages(imagePaths)
+    }
+
+    suspend fun permanentlyDeleteProducts(productIds: List<String>) {
+        productIds.distinct().forEach { permanentlyDeleteProduct(it) }
+    }
+
+    suspend fun undoPermanentlyDeletedProducts(productIds: List<String>) {
+        database.withTransaction {
+            val dao = database.dao()
+            for (productId in productIds.distinct()) {
+                val product = dao.getProduct(productId) ?: continue
+                if (!product.permanentlyDeleted || product.deletedAt == null) continue
+                check(System.currentTimeMillis() - product.deletedAt < 5_000L) {
+                    "Thời gian hoàn tác đã hết."
+                }
+                dao.undoPermanentDelete(productId)
+                dao.deleteUndoableDeleteMovements("DELETE:$productId:%")
+            }
+        }
+    }
+
+    suspend fun finalizePermanentDeletion(productIds: List<String>) {
+        val imagePaths = mutableListOf<String>()
+        database.withTransaction {
+            val dao = database.dao()
+            for (productId in productIds.distinct()) {
+                val product = dao.getProduct(productId) ?: continue
+                if (!product.permanentlyDeleted || product.deletedAt == null) continue
+                val branches = dao.getProductBranches(productId)
+                dao.setOrderLinesProductDeleted(branches.map { it.id }, true)
+                branches.forEach { branch ->
+                    if (branch.stock > 0.0) {
+                        dao.insertMovement(
+                            StockMovementRecord(
+                                id = UUID.randomUUID().toString(),
+                                branchId = branch.id,
+                                type = "DELETE_STOCK",
+                                quantityDelta = -branch.stock,
+                                happenedAt = System.currentTimeMillis(),
+                                referenceId = productId,
+                                syncStatus = "PENDING"
+                            )
+                        )
+                    }
+                }
+                dao.deleteUndoableDeleteMovements("DELETE:$productId:%")
+                imagePaths += listOfNotNull(product.imagePath) +
+                    product.additionalImagePaths.decodeImagePaths()
+                dao.clearProductStock(productId)
+                dao.clearProductBatchStock(productId)
+                dao.clearDeletedProductImages(productId)
+            }
+        }
+        deleteProductImages(imagePaths.distinct())
     }
 
     suspend fun permanentlyDeleteAllProducts() {
-        val imagePaths = mutableListOf<String>()
+        val productIds = mutableListOf<String>()
         database.withTransaction {
             val dao = database.dao()
             val now = System.currentTimeMillis()
             val products = dao.getProductsForPermanentDeletion()
-            if (products.isNotEmpty()) {
-                dao.markAllOrderLinesProductsDeleted()
-                products.forEach { product ->
-                    recordProductEvent(dao, product.id, "DELETE_PRODUCT", now)
-                }
-            }
-            imagePaths += products.flatMap {
-                listOfNotNull(it.imagePath) + it.additionalImagePaths.decodeImagePaths()
-            }
+            productIds += products.map { it.id }
             dao.permanentlyDeleteAllProducts(now)
         }
-        deleteProductImages(imagePaths.distinct())
+        finalizePermanentDeletion(productIds)
     }
 
     suspend fun hidePartialStock(productId: String, branchId: String, quantity: Double) {
@@ -910,8 +1248,8 @@ class LocalStore(
         database.withTransaction {
             val dao = database.dao()
             val product = checkNotNull(dao.getProduct(productId)) { "Không tìm thấy sản phẩm." }
-            check(product.active && !product.permanentlyDeleted) {
-                "Chỉ có thể ẩn một phần tồn kho của sản phẩm đang hiển thị."
+            check(!product.permanentlyDeleted) {
+                "Sản phẩm đã bị xóa."
             }
             val branch = checkNotNull(dao.getBranch(branchId)) { "Không tìm thấy đơn vị sản phẩm." }
             require(branch.productId == productId) { "Đơn vị không thuộc sản phẩm này." }
@@ -920,70 +1258,79 @@ class LocalStore(
             }
             require(quantity <= branch.stock) { "Số lượng ẩn vượt quá tồn kho hiện có." }
 
-            var remaining = quantity
-            for (batch in dao.getAvailableBatches(branchId).asReversed()) {
-                if (remaining <= 1e-8) break
-                val removed = minOf(remaining, batch.quantityRemaining)
-                dao.consumeBatch(batch.id, removed)
-                remaining -= removed
-            }
-            check(remaining <= 1e-8) { "Không đủ lô hàng để cập nhật tồn kho." }
+            removeAvailableBatches(dao, branchId, quantity)
             val now = System.currentTimeMillis()
+            val dayStart = archiveDayStart(now)
+            val archiveTime = product.archivedAt?.takeIf {
+                archiveDayStart(it) == dayStart
+            } ?: dayStart
             dao.adjustStock(branchId, -quantity)
+            dao.adjustArchivedStock(branchId, quantity)
+            dao.updateArchivedAt(productId, archiveTime)
+            recordArchiveMovement(dao, productId, branchId, quantity, now, dayStart)
+        }
+    }
+
+    suspend fun deleteExpiredArchivedProducts(): Int {
+        val today = Calendar.getInstance().apply {
+            timeInMillis = System.currentTimeMillis()
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val cutoff = (today.clone() as Calendar).apply {
+            add(Calendar.DAY_OF_YEAR, -30)
+            add(Calendar.DAY_OF_YEAR, 1)
+            add(Calendar.MILLISECOND, -1)
+        }.timeInMillis
+        val expiredProductIds = database.dao().getExpiredArchivedProducts(cutoff).map { it.id }
+        if (expiredProductIds.isNotEmpty()) {
+            permanentlyDeleteProducts(expiredProductIds)
+            finalizePermanentDeletion(expiredProductIds)
+        }
+        val pendingCutoff = System.currentTimeMillis() - 5_000L
+        val pendingDeleteIds = database.dao().getExpiredPendingDeletionIds(pendingCutoff)
+        finalizePermanentDeletion(pendingDeleteIds)
+        return expiredProductIds.size + pendingDeleteIds.size
+    }
+
+    private suspend fun recordArchiveMovement(
+        dao: KhoDao,
+        productId: String,
+        branchId: String,
+        quantity: Double,
+        happenedAt: Long,
+        dayStart: Long
+    ) {
+        val referenceId = "ARCHIVE:$productId:$dayStart"
+        val existing = dao.getArchiveMovement(branchId, referenceId)
+        if (existing != null) {
+            dao.updateMovementQuantity(existing.id, existing.quantityDelta - quantity)
+        } else {
             dao.insertMovement(
                 StockMovementRecord(
                     id = UUID.randomUUID().toString(),
                     branchId = branchId,
-                    type = "PARTIAL_HIDE",
+                    type = "ARCHIVE_STOCK",
                     quantityDelta = -quantity,
-                    happenedAt = now,
-                    referenceId = productId,
+                    happenedAt = happenedAt,
+                    referenceId = referenceId,
                     syncStatus = "PENDING"
                 )
             )
         }
     }
 
-    suspend fun deleteExpiredArchivedProducts(): Int {
-        val cutoff = System.currentTimeMillis() - ARCHIVE_RETENTION_MILLIS
-        val imagePaths = mutableListOf<String>()
-        var deletedCount = 0
-        database.withTransaction {
-            val dao = database.dao()
-            val expiredProducts = dao.getExpiredArchivedProducts(cutoff)
-            val now = System.currentTimeMillis()
-            expiredProducts.forEach { product ->
-                val branchIds = dao.getProductBranches(product.id).map { it.id }
-                dao.markOrderLinesProductDeleted(branchIds)
-                imagePaths += listOfNotNull(product.imagePath) +
-                    product.additionalImagePaths.decodeImagePaths()
-                recordProductEvent(dao, product.id, "DELETE_PRODUCT", now)
-                dao.permanentlyDeleteProduct(product.id, now)
-                deletedCount++
-            }
+    private suspend fun removeAvailableBatches(dao: KhoDao, branchId: String, quantity: Double) {
+        var remaining = quantity
+        for (batch in dao.getAvailableBatches(branchId).asReversed()) {
+            if (remaining <= 1e-8) break
+            val removed = minOf(remaining, batch.quantityRemaining)
+            dao.consumeBatch(batch.id, removed)
+            remaining -= removed
         }
-        deleteProductImages(imagePaths.distinct())
-        return deletedCount
-    }
-
-    private suspend fun recordProductEvent(
-        dao: KhoDao,
-        productId: String,
-        type: String,
-        happenedAt: Long
-    ) {
-        val branch = dao.getProductBranches(productId).firstOrNull() ?: return
-        dao.insertMovement(
-            StockMovementRecord(
-                id = UUID.randomUUID().toString(),
-                branchId = branch.id,
-                type = type,
-                quantityDelta = 0.0,
-                happenedAt = happenedAt,
-                referenceId = productId,
-                syncStatus = "PENDING"
-            )
-        )
+        check(remaining <= 1e-8) { "Không đủ lô hàng để cập nhật tồn kho." }
     }
 
     suspend fun importInventory(decisions: List<InventoryImportDecision>) {
@@ -1496,13 +1843,23 @@ private fun ProductWithBranches.toModel() = Product(
             unitType = UnitType.valueOf(branch.unitType),
             buyPrice = branch.buyPrice,
             sellPrice = branch.sellPrice,
-            lowStockThreshold = branch.lowStockThreshold
+            lowStockThreshold = branch.lowStockThreshold,
+            archivedStock = branch.archivedStock
         )
     }
 )
 
 private fun normalizeProductName(name: String): String =
     name.trim().replace(Regex("\\s+"), " ")
+
+private fun archiveDayStart(timestamp: Long): Long =
+    Calendar.getInstance().apply {
+        timeInMillis = timestamp
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
 
 private fun List<String>.encodeImagePaths(): String = JSONArray(this).toString()
 
