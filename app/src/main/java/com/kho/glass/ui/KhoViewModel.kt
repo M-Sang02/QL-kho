@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.kho.glass.data.LocalStore
+import com.kho.glass.data.ArchivedProductCleanupWorker
 import com.kho.glass.data.FirestoreWarehouseSync
 import com.kho.glass.data.InventoryImportDecision
 import com.kho.glass.data.Product
@@ -56,6 +57,38 @@ class KhoViewModel(
     private val store = LocalStore(application, userId, warehouseId)
 
     init {
+        ArchivedProductCleanupWorker.schedule(
+            application,
+            userId,
+            warehouseId,
+            accountUid,
+            remoteWarehouseId
+        )
+        viewModelScope.launch {
+            kotlinx.coroutines.yield()
+            try {
+                if (store.deleteExpiredArchivedProducts() > 0) {
+                    message = "Đã tự động xóa sản phẩm ẩn quá 30 ngày và ảnh liên quan."
+                    accountUid?.let {
+                        FirestoreWarehouseSync.schedule(
+                            application,
+                            it,
+                            userId,
+                            warehouseId,
+                            remoteWarehouseId
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IOException) {
+                message = "Không dọn được sản phẩm đã ẩn: ${error.localizedMessage ?: "lỗi tệp"}"
+            } catch (error: SQLiteException) {
+                message = "Không dọn được sản phẩm đã ẩn: ${error.localizedMessage ?: "lỗi cơ sở dữ liệu"}"
+            } catch (error: IllegalStateException) {
+                message = error.message ?: "Không dọn được sản phẩm đã ẩn."
+            }
+        }
         accountUid?.let {
             FirestoreWarehouseSync.schedule(
                 application,
@@ -159,6 +192,15 @@ class KhoViewModel(
     fun permanentlyDeleteProduct(productId: String) = performAction {
         store.permanentlyDeleteProduct(productId)
         message = "Đã xóa sản phẩm và ảnh khỏi danh sách kho; đơn hàng cũ vẫn được giữ."
+    }
+
+    fun hidePartialStock(productId: String, branchId: String, quantity: String) = performAction {
+        store.hidePartialStock(
+            productId,
+            branchId,
+            quantity.toDoubleOrNull() ?: throw IllegalArgumentException("Số lượng không hợp lệ.")
+        )
+        message = "Đã ẩn một phần tồn kho."
     }
 
     fun permanentlyDeleteAllProducts() = performAction {

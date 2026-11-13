@@ -488,6 +488,8 @@ private fun List<CloudRecord>.toLatestSnapshot(): CloudWarehouseSnapshot {
             createdAt = data.long("createdAt"),
             imagePath = null,
             permanentlyDeleted = data.boolean("permanentlyDeleted"),
+            archivedAt = data.nullableLong("archivedAt"),
+            deletedAt = data.nullableLong("deletedAt"),
             unitSummaryLabel = data.string("unitSummaryLabel"),
             additionalImagePaths = "[]"
         )

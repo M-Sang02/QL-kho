@@ -363,6 +363,16 @@ fun KhoApp(
             preferences.getFloat("${warehousePreferencesPrefix}add_fab_y", 1f).coerceIn(0f, 1f)
         )
     }
+    var filterFabX by remember(preferences, selectedWarehouseId) {
+        mutableFloatStateOf(
+            preferences.getFloat("${warehousePreferencesPrefix}filter_fab_x", 1f).coerceIn(0f, 1f)
+        )
+    }
+    var filterFabY by remember(preferences, selectedWarehouseId) {
+        mutableFloatStateOf(
+            preferences.getFloat("${warehousePreferencesPrefix}filter_fab_y", 1f).coerceIn(0f, 1f)
+        )
+    }
     val snackbarHostState = remember { SnackbarHostState() }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -387,7 +397,6 @@ fun KhoApp(
             } ?: StockUnitFilter.PIECE
         )
     }
-    var renameDialog by remember { mutableStateOf(false) }
     var recentOnly by remember { mutableStateOf(false) }
     var filterDialogVisible by remember { mutableStateOf(false) }
     var zoomedProduct by remember { mutableStateOf<Product?>(null) }
@@ -539,6 +548,12 @@ fun KhoApp(
             .putFloat("${warehousePreferencesPrefix}add_fab_y", fabY)
             .apply()
     }
+    LaunchedEffect(filterFabX, filterFabY) {
+        preferences.edit()
+            .putFloat("${warehousePreferencesPrefix}filter_fab_x", filterFabX)
+            .putFloat("${warehousePreferencesPrefix}filter_fab_y", filterFabY)
+            .apply()
+    }
 
     LaunchedEffect(vm.message) {
         val message = vm.message
@@ -648,11 +663,13 @@ fun KhoApp(
                             }
                         )
                         NavigationDrawerItem(
-                            label = { Text("Đổi tên kho") },
-                            selected = false,
-                            icon = { Icon(Icons.Default.Edit, null) },
+                            label = { Text("Tìm kiếm") },
+                            selected = tab == 6,
+                            icon = { Icon(Icons.Default.Search, null) },
                             onClick = {
-                                renameDialog = true
+                                tab = 6
+                                productFilter = ProductFilter.ALL
+                                recentOnly = false
                                 scope.launch { drawerState.close() }
                             }
                         )
@@ -1256,19 +1273,82 @@ fun KhoApp(
                         )
                     }
                 } else if (tab == 6) {
+                    val fabSize = 56.dp
+                    val fabMargin = 16.dp
+                    val density = LocalDensity.current
                     Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(16.dp)
+                        modifier = Modifier.fillMaxSize()
                     ) {
                         FloatingActionButton(
                             onClick = { filterDialogVisible = true },
                             containerColor = MaterialTheme.colorScheme.primary.copy(
                                 alpha = if (appearance.glassEffectEnabled) 0.84f else 1f
                             ),
-                            contentColor = MaterialTheme.colorScheme.onPrimary
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier
+                                .offset(
+                                    x = fabMargin +
+                                        (maxWidth - fabSize - fabMargin * 2).coerceAtLeast(0.dp) *
+                                        filterFabX,
+                                    y = fabMargin +
+                                        (maxHeight - fabSize - fabMargin * 2).coerceAtLeast(0.dp) *
+                                        filterFabY
+                                )
+                                .size(fabSize)
+                                .pointerInput(maxWidth, maxHeight) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        val downAt = SystemClock.uptimeMillis()
+                                        var dragging = false
+                                        var finished = false
+                                        while (!finished) {
+                                            val event = awaitPointerEvent()
+                                            val change = event.changes.firstOrNull {
+                                                it.id == down.id
+                                            }
+                                            if (change == null) {
+                                                finished = true
+                                            } else if (!change.pressed) {
+                                                if (!dragging &&
+                                                    SystemClock.uptimeMillis() - downAt < 1_000L
+                                                ) {
+                                                    filterDialogVisible = true
+                                                }
+                                                finished = true
+                                            } else if (
+                                                SystemClock.uptimeMillis() - downAt >= 1_000L
+                                            ) {
+                                                dragging = true
+                                                val availableWidth = with(density) {
+                                                    (maxWidth - fabSize - fabMargin * 2)
+                                                        .coerceAtLeast(0.dp).toPx()
+                                                }
+                                                val availableHeight = with(density) {
+                                                    (maxHeight - fabSize - fabMargin * 2)
+                                                        .coerceAtLeast(0.dp).toPx()
+                                                }
+                                                if (availableWidth > 0f) {
+                                                    filterFabX = (
+                                                        filterFabX +
+                                                            change.positionChange().x / availableWidth
+                                                        ).coerceIn(0f, 1f)
+                                                }
+                                                if (availableHeight > 0f) {
+                                                    filterFabY = (
+                                                        filterFabY +
+                                                            change.positionChange().y / availableHeight
+                                                        ).coerceIn(0f, 1f)
+                                                }
+                                                change.consume()
+                                            }
+                                        }
+                                    }
+                                }
                         ) {
-                            Icon(Icons.Default.FilterList, contentDescription = "Lọc và sắp xếp")
+                            Icon(
+                                Icons.Default.FilterList,
+                                contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để lọc"
+                            )
                         }
                     }
                 }
@@ -1416,20 +1496,6 @@ fun KhoApp(
                 },
                 onCropError = { message ->
                     vm.message = "Không cắt được ảnh chia sẻ: $message"
-                }
-            )
-        }
-        if (renameDialog) {
-            RenameWarehouseDialog(
-                currentName = appName,
-                onDismiss = { renameDialog = false },
-                onSave = {
-                    warehouses = warehouses.map { warehouse ->
-                        if (warehouse.id == selectedWarehouseId) warehouse.copy(name = it)
-                        else warehouse
-                    }
-                    renameDialog = false
-                    vm.message = "Đã đổi tên kho."
                 }
             )
         }
@@ -1935,27 +2001,60 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
         }
         items(movements, key = { it.id }) { movement ->
             val isIncoming = movement.quantityDelta >= 0.0
+            val isLifecycle = movement.type in setOf(
+                "HIDE_PRODUCT",
+                "PARTIAL_HIDE",
+                "RESTORE_PRODUCT",
+                "DELETE_PRODUCT"
+            )
+            val movementIcon = when {
+                movement.productDeleted && movement.type in setOf(
+                    "HIDE_PRODUCT",
+                    "DELETE_PRODUCT"
+                ) -> Icons.Default.Close
+                movement.type == "HIDE_PRODUCT" || movement.type == "PARTIAL_HIDE" ->
+                    Icons.Default.VisibilityOff
+                movement.type == "RESTORE_PRODUCT" -> Icons.Default.Restore
+                movement.type == "DELETE_PRODUCT" -> Icons.Default.Close
+                isIncoming -> Icons.Default.ArrowDownward
+                else -> Icons.Default.ArrowUpward
+            }
             GlassCard(Modifier.fillMaxWidth()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        if (isIncoming) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
+                        movementIcon,
                         contentDescription = null,
-                        tint = if (isIncoming) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.error
+                        tint = when {
+                            movement.type == "DELETE_PRODUCT" ||
+                                (movement.productDeleted && movement.type == "HIDE_PRODUCT") ->
+                                MaterialTheme.colorScheme.error
+                            movement.type == "HIDE_PRODUCT" || movement.type == "PARTIAL_HIDE" ->
+                                MaterialTheme.colorScheme.tertiary
+                            movement.type == "RESTORE_PRODUCT" ->
+                                MaterialTheme.colorScheme.primary
+                            isIncoming -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.error
+                        }
                     )
                     Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                        Text(movement.productName, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            movement.productName +
+                                if (movement.productDeleted && !isLifecycle) " · đã xóa" else "",
+                            style = MaterialTheme.typography.titleSmall
+                        )
                         Text(
                             "${movement.branchName} · ${stockMovementTitle(movement.type)}",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    Text(
-                        "${if (isIncoming) "+" else ""}${quantity(movement.quantityDelta)}",
-                        color = if (isIncoming) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    if (movement.type == "PARTIAL_HIDE" || !isLifecycle) {
+                        Text(
+                            "${if (isIncoming) "+" else ""}${quantity(movement.quantityDelta)}",
+                            color = if (isIncoming) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
                 }
                 Text(
                     dateTime(movement.happenedAt),
@@ -1973,6 +2072,10 @@ private fun stockMovementTitle(type: String): String = when (type) {
     "RESTORE" -> "Khôi phục tồn"
     "SALE" -> "Bán hàng"
     "CANCEL_SALE" -> "Hủy đơn, hoàn kho"
+    "HIDE_PRODUCT" -> "Ẩn sản phẩm"
+    "PARTIAL_HIDE" -> "Ẩn một phần tồn kho"
+    "RESTORE_PRODUCT" -> "Khôi phục sản phẩm"
+    "DELETE_PRODUCT" -> "Đã xóa sản phẩm"
     else -> type
 }
 
@@ -2360,6 +2463,7 @@ private fun Inventory(
     var deletingProduct by remember { mutableStateOf<Product?>(null) }
     var zoomProduct by remember { mutableStateOf<Product?>(null) }
     var editingUnitLabel by remember { mutableStateOf<Product?>(null) }
+    var partiallyHidingProduct by remember { mutableStateOf<Product?>(null) }
     var expandedProductIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val lowStockCount = products.sumOf { product -> product.branches.count(::isLowStock) }
     PullToRefreshBox(
@@ -2498,16 +2602,37 @@ private fun Inventory(
             onDismissRequest = { hidingProduct = null },
             title = { DialogTitleWithClose("Ẩn sản phẩm?") { hidingProduct = null } },
             text = {
-                Text("“${product.name}” sẽ không còn trong danh sách bán hàng. Lịch sử đơn hàng và tồn kho được giữ lại.")
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "“${product.name}” sẽ không còn trong danh sách bán hàng. " +
+                            "Lịch sử đơn hàng và tồn kho được giữ lại."
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            hidingProduct = null
+                            partiallyHidingProduct = product
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Ẩn một phần tồn kho")
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
                     vm.deactivateProduct(product.id)
                     hidingProduct = null
                 }) { Text("Ẩn sản phẩm") }
-            },
-            dismissButton = {
-                TextButton(onClick = { hidingProduct = null }) { Text("Không ẩn") }
+            }
+        )
+    }
+    partiallyHidingProduct?.let { product ->
+        PartialHideDialog(
+            product = product,
+            onDismiss = { partiallyHidingProduct = null },
+            onSave = { branchId, quantity ->
+                vm.hidePartialStock(product.id, branchId, quantity)
+                partiallyHidingProduct = null
             }
         )
     }
@@ -2582,6 +2707,64 @@ private fun UnitSummaryLabelDialog(
 }
 
 @Composable
+private fun PartialHideDialog(
+    product: Product,
+    onDismiss: () -> Unit,
+    onSave: (branchId: String, quantity: String) -> Unit
+) {
+    var selectedBranchId by remember(product.id) {
+        mutableStateOf(product.branches.firstOrNull()?.id.orEmpty())
+    }
+    var quantityValue by remember(product.id) { mutableStateOf("") }
+    val selectedBranch = product.branches.firstOrNull { it.id == selectedBranchId }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { DialogTitleWithClose("Ẩn một phần tồn kho") { onDismiss() } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Số lượng sẽ giảm khỏi tồn kho sẵn có; sản phẩm vẫn hiển thị trong danh sách."
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    product.branches.forEach { branch ->
+                        FilterChip(
+                            selected = branch.id == selectedBranchId,
+                            onClick = {
+                                selectedBranchId = branch.id
+                                quantityValue = ""
+                            },
+                            label = { Text(branch.name) }
+                        )
+                    }
+                }
+                selectedBranch?.let { branch ->
+                    Text("Tồn hiện có: ${quantity(branch.stock, branch.unitType)}")
+                    OutlinedTextField(
+                        value = quantityValue,
+                        onValueChange = { quantityValue = it },
+                        label = { Text("Số lượng cần ẩn (${branch.name})") },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = if (branch.unitType == UnitType.PIECE) {
+                                KeyboardType.Number
+                            } else KeyboardType.Decimal
+                        ),
+                        singleLine = true
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = selectedBranch != null && quantityValue.isNotBlank(),
+                onClick = {
+                    selectedBranch?.let { onSave(it.id, quantityValue) }
+                }
+            ) { Text("Ẩn số lượng") }
+        }
+    )
+}
+
+@Composable
 private fun ProductGridCard(
     product: Product,
     expanded: Boolean,
@@ -2646,7 +2829,7 @@ private fun ProductGridCard(
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 34.dp)
-                    .pointerInput(product.id) {
+                    .pointerInput(product.id, imageIndex) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val held = withTimeoutOrNull(2_000L) {
@@ -2693,36 +2876,55 @@ private fun ProductGridCard(
                 }
             }
         }
-            if (expanded && !archived) {
-                product.branches.forEach { branch ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(branch.name, style = MaterialTheme.typography.labelLarge)
-                            Text(
-                                quantity(branch.stock, branch.unitType),
-                                color = if (isLowStock(branch)) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        Text(
-                            "Nhập ${money(branch.buyPrice)} · Bán ${money(branch.sellPrice)}",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            TextButton(onClick = { onReceive(branch) }) {
-                                Text("Nhập")
+            if (expanded) {
+                if (archived) {
+                    val dayMillis = 24L * 60 * 60 * 1000
+                    val daysRemaining = product.archivedAt?.let { archivedAt ->
+                        val remaining = (
+                            archivedAt + 30L * dayMillis - System.currentTimeMillis()
+                            ).coerceAtLeast(0L)
+                        ((remaining + dayMillis - 1) / dayMillis).toInt()
+                    } ?: 30
+                    Text(
+                        if (daysRemaining == 0) {
+                            "Sản phẩm sẽ được tự động xóa trong hôm nay."
+                        } else {
+                            "Còn $daysRemaining ngày sẽ tự xóa sản phẩm và ảnh."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else {
+                    product.branches.forEach { branch ->
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(branch.name, style = MaterialTheme.typography.labelLarge)
+                                Text(
+                                    quantity(branch.stock, branch.unitType),
+                                    color = if (isLowStock(branch)) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
                             }
-                            TextButton(onClick = { onEditPrice(branch) }) {
-                                Text("Sửa giá")
+                            Text(
+                                "Nhập ${money(branch.buyPrice)} · Bán ${money(branch.sellPrice)}",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(onClick = { onReceive(branch) }) {
+                                    Text("Nhập")
+                                }
+                                TextButton(onClick = { onEditPrice(branch) }) {
+                                    Text("Sửa giá")
+                                }
                             }
                         }
                     }
-                }
-                TextButton(onClick = onAddUnit, modifier = Modifier.align(Alignment.End)) {
-                    Text("Thêm đơn vị")
+                    TextButton(onClick = onAddUnit, modifier = Modifier.align(Alignment.End)) {
+                        Text("Thêm đơn vị")
+                    }
                 }
             }
         }
@@ -4912,13 +5114,15 @@ private fun ProductDialog(
                         Spacer(Modifier.size(6.dp))
                         Text("Chọn nhiều ảnh")
                     }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { captureImage(asAdditional = true) },
                         enabled = !savingImage && additionalImagePaths.size < 10
                     ) {
                         Icon(Icons.Default.PhotoCamera, contentDescription = null)
                         Spacer(Modifier.size(6.dp))
-                        Text("Chụp ảnh")
+                        Text("Thêm ảnh chụp")
                     }
                 }
                 OutlinedTextField(

@@ -12,6 +12,7 @@ data class Product(
     val imagePath: String? = null,
     val additionalImagePaths: List<String> = emptyList(),
     val createdAt: Long = 0L,
+    val archivedAt: Long? = null,
     val unitSummaryLabel: String = "loại",
     val branches: List<UnitBranch> = emptyList()
 )
@@ -48,7 +49,8 @@ data class StockMovementView(
     val referenceId: String?,
     val syncStatus: String,
     val productName: String,
-    val branchName: String
+    val branchName: String,
+    val productDeleted: Boolean
 )
 
 data class SalesOrder(
