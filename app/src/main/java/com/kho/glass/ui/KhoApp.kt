@@ -504,57 +504,58 @@ fun KhoApp(
                 }
             }
         }
-        val qrCameraPicker = rememberLauncherForActivityResult(
-            ActivityResultContracts.TakePicture()
-        ) { captured ->
-            val file = qrCameraFile
-            val uri = qrCameraUri
-            if (captured && file?.isFile == true && uri != null) {
-                scope.launch {
-                    try {
-                        val savedPath = withContext(Dispatchers.IO) {
-                            persistProductImage(context, uri, null, file.length())
-                        }
-                        qrEditorImagePath = savedPath
-                        qrEditorCreatedImages = qrEditorCreatedImages + savedPath
-                    } catch (failure: IOException) {
-                        qrImagePickerMessage =
-                            "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
-                    } finally {
-                        file.delete()
-                        qrCameraFile = null
-                        qrCameraUri = null
-                    }
-                }
-            } else {
-                file?.delete()
-                qrCameraFile = null
-                qrCameraUri = null
-                if (!captured) qrImagePickerMessage = "Không chụp được ảnh mã QR."
-            }
-        }
+    }
 
-        fun captureQrImage() {
-            try {
-                val directory = File(context.cacheDir, "product-captures")
-                if (!directory.exists() && !directory.mkdirs()) {
-                    throw IOException("Không tạo được thư mục ảnh tạm.")
+    val qrCameraPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { captured ->
+        val file = qrCameraFile
+        val uri = qrCameraUri
+        if (captured && file?.isFile == true && uri != null) {
+            scope.launch {
+                try {
+                    val savedPath = withContext(Dispatchers.IO) {
+                        persistProductImage(context, uri, null, file.length())
+                    }
+                    qrEditorImagePath = savedPath
+                    qrEditorCreatedImages = qrEditorCreatedImages + savedPath
+                } catch (failure: IOException) {
+                    qrImagePickerMessage =
+                        "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                } finally {
+                    file.delete()
+                    qrCameraFile = null
+                    qrCameraUri = null
                 }
-                val file = File.createTempFile("qr_capture_", ".jpg", directory)
-                val uri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    file
-                )
-                qrCameraFile = file
-                qrCameraUri = uri
-                qrCameraPicker.launch(uri)
-            } catch (failure: IOException) {
-                qrImagePickerMessage =
-                    "Không thể mở máy ảnh: ${failure.localizedMessage ?: "lỗi tệp"}"
-            } catch (failure: IllegalArgumentException) {
-                qrImagePickerMessage = "Không thể tạo địa chỉ ảnh tạm."
             }
+        } else {
+            file?.delete()
+            qrCameraFile = null
+            qrCameraUri = null
+            if (!captured) qrImagePickerMessage = "Không chụp được ảnh mã QR."
+        }
+    }
+
+    fun captureQrImage() {
+        try {
+            val directory = File(context.cacheDir, "product-captures")
+            if (!directory.exists() && !directory.mkdirs()) {
+                throw IOException("Không tạo được thư mục ảnh tạm.")
+            }
+            val file = File.createTempFile("qr_capture_", ".jpg", directory)
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            qrCameraFile = file
+            qrCameraUri = uri
+            qrCameraPicker.launch(uri)
+        } catch (failure: IOException) {
+            qrImagePickerMessage =
+                "Không thể mở máy ảnh: ${failure.localizedMessage ?: "lỗi tệp"}"
+        } catch (failure: IllegalArgumentException) {
+            qrImagePickerMessage = "Không thể tạo địa chỉ ảnh tạm."
         }
     }
     val currentLowStockLevelsUpdated by rememberUpdatedState(currentLowStockLevels)
@@ -2517,6 +2518,7 @@ private fun encodeReceiveQrEntries(entries: List<ReceiveQrEntry>): String =
         }
     }.toString()
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ReceiveQrScreen(
     entries: List<ReceiveQrEntry>,
@@ -2660,6 +2662,7 @@ private fun ReceiveQrScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun QrInformationCard(label: String, value: String, onCopy: () -> Unit) {
     Card(
