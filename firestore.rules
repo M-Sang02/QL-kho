@@ -1,0 +1,148 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(warehouseId) {
+      let memberPath = /databases/$(database)/documents/warehouses/$(warehouseId)/members/$(request.auth.uid);
+      return signedIn() && exists(memberPath) &&
+        (
+          get(memberPath).data.role == 'owner' ||
+          !get(memberPath).data.keys().hasAny(['status']) ||
+          get(memberPath).data.status == 'approved'
+        ) &&
+        !shareAccessExpired(get(memberPath).data);
+    }
+
+    function shareAccessExpired(member) {
+      return member.keys().hasAny(['inviteHash']) &&
+        exists(/databases/$(database)/documents/warehouseInvites/$(member.inviteHash)) &&
+        get(/databases/$(database)/documents/warehouseInvites/$(member.inviteHash)).data.active == false &&
+        get(/databases/$(database)/documents/warehouseInvites/$(member.inviteHash)).data.disabledAt is timestamp &&
+        request.time > get(/databases/$(database)/documents/warehouseInvites/$(member.inviteHash)).data.disabledAt + duration.value(30, 'd') &&
+        request.time > (
+          member.keys().hasAny(['lastSyncAt'])
+            ? member.lastSyncAt
+            : member.joinedAt
+        ) + duration.value(30, 'd');
+    }
+
+    function isOwner(warehouseId) {
+      return signedIn() &&
+        get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.ownerUid == request.auth.uid;
+    }
+
+    match /warehouses/{warehouseId} {
+      allow create: if signedIn() &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.schemaVersion == 1;
+      allow get: if signedIn();
+      allow list: if isMember(warehouseId);
+      allow update: if isOwner(warehouseId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activeInviteHash']);
+      allow delete: if false;
+
+      match /members/{memberUid} {
+        allow get: if isMember(warehouseId) ||
+          (signedIn() && request.auth.uid == memberUid);
+        allow list: if isMember(warehouseId);
+        allow create: if (isOwner(warehouseId) &&
+            ((memberUid == request.auth.uid && request.resource.data.role == 'owner') ||
+             request.resource.data.role == 'member')) ||
+          (signedIn() &&
+            request.auth.uid == memberUid &&
+            request.resource.data.role == 'member' &&
+            request.resource.data.status == 'pending' &&
+            request.resource.data.inviteHash is string &&
+            exists(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)) &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.active == true &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.warehouseId == warehouseId &&
+            get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.activeInviteHash == request.resource.data.inviteHash);
+        allow update: if (
+            isOwner(warehouseId) &&
+            resource.data.role == 'member' &&
+            resource.data.status == 'pending' &&
+            request.resource.data.role == 'member' &&
+            request.resource.data.status in ['approved', 'rejected'] &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'decidedAt'])
+          ) || (
+            signedIn() &&
+            request.auth.uid == memberUid &&
+            request.resource.data.role == resource.data.role &&
+            request.resource.data.status == resource.data.status &&
+            request.resource.data.inviteHash == resource.data.inviteHash &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSyncAt'])
+          ) || (
+            signedIn() &&
+            request.auth.uid == memberUid &&
+            resource.data.status == 'approved' &&
+            request.resource.data.status == 'expired' &&
+            request.resource.data.role == resource.data.role &&
+            request.resource.data.inviteHash == resource.data.inviteHash &&
+            shareAccessExpired(resource.data) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'expiredAt'])
+          ) || (
+            signedIn() &&
+            request.auth.uid == memberUid &&
+            resource.data.status in ['rejected', 'expired'] &&
+            request.resource.data.status == 'pending' &&
+            request.resource.data.role == 'member' &&
+            request.resource.data.inviteHash is string &&
+            exists(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)) &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.active == true &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.warehouseId == warehouseId &&
+            get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.activeInviteHash == request.resource.data.inviteHash &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'inviteHash', 'requestedAt', 'joinedAt'])
+          ) || (
+            signedIn() &&
+            request.auth.uid == memberUid &&
+            resource.data.status == 'pending' &&
+            request.resource.data.status == 'pending' &&
+            request.resource.data.role == resource.data.role &&
+            request.resource.data.inviteHash is string &&
+            exists(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)) &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.active == true &&
+            get(/databases/$(database)/documents/warehouseInvites/$(request.resource.data.inviteHash)).data.warehouseId == warehouseId &&
+            get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.activeInviteHash == request.resource.data.inviteHash &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['inviteHash', 'requestedAt'])
+          );
+        allow delete: if memberUid != get(/databases/$(database)/documents/warehouses/$(warehouseId)).data.ownerUid &&
+          (isOwner(warehouseId) || (signedIn() && request.auth.uid == memberUid));
+      }
+
+      match /changes/{changeId} {
+        allow read: if isMember(warehouseId);
+        allow create: if isMember(warehouseId) &&
+          request.resource.data.writerUid == request.auth.uid &&
+          request.resource.data.entityId is string &&
+          request.resource.data.payload is map &&
+          request.resource.data.entityType in [
+            'products', 'branches', 'batches', 'movements',
+            'orders', 'orderLines', 'allocations', 'payments'
+          ];
+        allow update: if isMember(warehouseId) &&
+          request.resource.data.writerUid == resource.data.writerUid &&
+          request.resource.data.entityType == resource.data.entityType &&
+          request.resource.data.entityId == resource.data.entityId &&
+          request.resource.data.payload == resource.data.payload;
+        allow delete: if false;
+      }
+    }
+
+    match /warehouseInvites/{codeHash} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.active == true &&
+        isOwner(request.resource.data.warehouseId);
+      allow update: if isOwner(resource.data.warehouseId) &&
+        request.resource.data.warehouseId == resource.data.warehouseId &&
+        request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if isOwner(resource.data.warehouseId);
+    }
+  }
+}

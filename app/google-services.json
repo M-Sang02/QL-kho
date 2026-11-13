@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "1053585706173",
+    "project_id": "ql-kho-403fc",
+    "storage_bucket": "ql-kho-403fc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1053585706173:android:6d541464c6f352269dfbd4",
+        "android_client_info": {
+          "package_name": "com.kho.glass"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1053585706173-bh9v6rtc5i331bsbgeqd17uvmjronoot.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kho.glass",
+            "certificate_hash": "a6e947999298e37acc347e2d14f9a42625fb38d3"
+          }
+        },
+        {
+          "client_id": "1053585706173-dubd9te4qdmbnk102giacr2375pej015.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kho.glass",
+            "certificate_hash": "90f278163d9063c2fe0d80c0c9d1dc5ad2d3b39c"
+          }
+        },
+        {
+          "client_id": "1053585706173-oue0fvcm7othm8eml0hdrr1g2jb64i8q.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBI5Z_EfGD9eOQbBdf6odqz39Kf9_r5LFg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1053585706173-0fi2rlpviibcg9ium7qv85ub2i0i2v0s.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
