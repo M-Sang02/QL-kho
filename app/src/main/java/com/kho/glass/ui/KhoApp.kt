@@ -240,7 +240,8 @@ private data class ReceiveQrEntry(
     val recipientName: String,
     val accountNumber: String,
     val bankName: String,
-    val imagePath: String?
+    val imagePath: String?,
+    val note: String = DEFAULT_QR_NOTE
 )
 private data class PendingQrDelete(
     val entry: ReceiveQrEntry,
@@ -249,6 +250,7 @@ private data class PendingQrDelete(
 )
 
 private const val DEFAULT_WAREHOUSE_ID = "default"
+private const val DEFAULT_QR_NOTE = "Nhấn giữ để sao chép"
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -486,21 +488,25 @@ fun KhoApp(
     }
     var qrImagePickerMessage by remember { mutableStateOf<String?>(null) }
     var qrCameraFile by remember { mutableStateOf<File?>(null) }
-    var qrCameraUri by remember { mutableStateOf<Uri?>(null) }
     val qrImagePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.size > 1) {
+            qrImagePickerMessage = "Chỉ chọn một ảnh mã QR."
+        } else {
+            val uri = uris.firstOrNull() ?: return@rememberLauncherForActivityResult
             scope.launch {
                 try {
                     val savedPath = withContext(Dispatchers.IO) {
-                        persistProductImage(context, uri, null, queryImageSize(context, uri))
+                        importQrImage(context, uri)
                     }
                     qrEditorImagePath = savedPath
                     qrEditorCreatedImages = qrEditorCreatedImages + savedPath
                 } catch (failure: IOException) {
                     qrImagePickerMessage =
                         "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                } catch (failure: SecurityException) {
+                    qrImagePickerMessage = "Không có quyền đọc ảnh QR đã chọn."
                 }
             }
         }
@@ -510,12 +516,11 @@ fun KhoApp(
         ActivityResultContracts.TakePicture()
     ) { captured ->
         val file = qrCameraFile
-        val uri = qrCameraUri
-        if (captured && file?.isFile == true && uri != null) {
+            if (captured && file?.isFile == true) {
             scope.launch {
                 try {
                     val savedPath = withContext(Dispatchers.IO) {
-                        persistProductImage(context, uri, null, file.length())
+                        persistQrImageFile(context, file)
                     }
                     qrEditorImagePath = savedPath
                     qrEditorCreatedImages = qrEditorCreatedImages + savedPath
@@ -525,13 +530,11 @@ fun KhoApp(
                 } finally {
                     file.delete()
                     qrCameraFile = null
-                    qrCameraUri = null
                 }
             }
         } else {
             file?.delete()
             qrCameraFile = null
-            qrCameraUri = null
             if (!captured) qrImagePickerMessage = "Không chụp được ảnh mã QR."
         }
     }
@@ -549,7 +552,6 @@ fun KhoApp(
                 file
             )
             qrCameraFile = file
-            qrCameraUri = uri
             qrCameraPicker.launch(uri)
         } catch (failure: IOException) {
             qrImagePickerMessage =
@@ -1890,21 +1892,23 @@ fun KhoApp(
                     qrEditorCreatedImages = emptyList()
                     showQrEditor = false
                 },
-                onSave = { recipient, account, bank, imagePath ->
+                onSave = { recipient, account, bank, imagePath, note ->
                     val savedEntry = if (existingQr == null) {
                         ReceiveQrEntry(
                             id = UUID.randomUUID().toString(),
                             recipientName = recipient,
                             accountNumber = account,
                             bankName = bank,
-                            imagePath = imagePath
+                            imagePath = imagePath,
+                            note = note
                         )
                     } else {
                         existingQr.copy(
                             recipientName = recipient,
                             accountNumber = account,
                             bankName = bank,
-                            imagePath = imagePath
+                            imagePath = imagePath,
+                            note = note
                         )
                     }
                     receiveQrEntries = if (existingQr == null) {
@@ -2496,7 +2500,8 @@ private fun decodeReceiveQrEntries(serialized: String?): List<ReceiveQrEntry> {
                 bankName = row.getString("bankName"),
                 imagePath = if (row.isNull("imagePath")) null else {
                     row.getString("imagePath").takeIf { it.isNotBlank() }
-                }
+                },
+                note = row.optString("note", DEFAULT_QR_NOTE)
             )
         }
     } catch (failure: JSONException) {
@@ -2514,6 +2519,7 @@ private fun encodeReceiveQrEntries(entries: List<ReceiveQrEntry>): String =
                     .put("accountNumber", entry.accountNumber)
                     .put("bankName", entry.bankName)
                     .put("imagePath", entry.imagePath ?: JSONObject.NULL)
+                    .put("note", entry.note)
             )
         }
     }.toString()
@@ -2627,6 +2633,14 @@ private fun ReceiveQrScreen(
                     copyQrText(context, selectedEntry.bankName, "Đã sao chép tên ngân hàng")
                 }
             )
+            if (selectedEntry.note.isNotBlank()) {
+                Text(
+                    selectedEntry.note,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
             OutlinedButton(onClick = onManage) {
                 Icon(Icons.Default.Edit, contentDescription = null)
                 Text("  Quản lý mã QR")
@@ -2680,7 +2694,6 @@ private fun QrInformationCard(label: String, value: String, onCopy: () -> Unit) 
         ) {
             Text(label, style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             Text(value, style = MaterialTheme.typography.titleMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-            Text("Nhấn giữ để sao chép", style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -2818,7 +2831,13 @@ private fun QrEntryDialog(
     imagePath: String?,
     onPickImage: () -> Unit,
     onCaptureImage: () -> Unit,
-    onSave: (recipient: String, account: String, bank: String, imagePath: String?) -> Unit,
+    onSave: (
+        recipient: String,
+        account: String,
+        bank: String,
+        imagePath: String?,
+        note: String
+    ) -> Unit,
     onDismiss: () -> Unit
 ) {
     var recipient by remember(initialEntry?.id) {
@@ -2829,6 +2848,9 @@ private fun QrEntryDialog(
     }
     var bank by remember(initialEntry?.id) {
         mutableStateOf(initialEntry?.bankName.orEmpty())
+    }
+    var note by remember(initialEntry?.id) {
+        mutableStateOf(initialEntry?.note ?: DEFAULT_QR_NOTE)
     }
     var error by remember(initialEntry?.id) { mutableStateOf<String?>(null) }
     AlertDialog(
@@ -2895,6 +2917,14 @@ private fun QrEntryDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("Ghi chú hiển thị dưới thông tin QR") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 3
+                )
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
@@ -2903,7 +2933,7 @@ private fun QrEntryDialog(
                 if (recipient.isBlank() || account.isBlank() || bank.isBlank()) {
                     error = "Nhập đầy đủ tên người nhận, số tài khoản và ngân hàng."
                 } else {
-                    onSave(recipient.trim(), account.trim(), bank.trim(), imagePath)
+                    onSave(recipient.trim(), account.trim(), bank.trim(), imagePath, note.trim())
                 }
             }) { Text("Lưu") }
         }
@@ -6705,6 +6735,47 @@ private fun persistProductImage(
         destination.delete()
         throw IOException("Không có quyền đọc ảnh đã chọn.", failure)
     }
+}
+
+private fun importQrImage(context: Context, source: Uri): String {
+    val temporaryFile = File.createTempFile("qr_import_", ".image", context.cacheDir)
+    try {
+        val input = context.contentResolver.openInputStream(source)
+            ?: throw IOException("Trình chọn ảnh không mở được tệp đã chọn.")
+        input.use { sourceStream ->
+            FileOutputStream(temporaryFile).use { destination ->
+                sourceStream.copyTo(destination)
+            }
+        }
+        if (temporaryFile.length() == 0L) {
+            throw IOException("Ảnh được chọn không có dữ liệu.")
+        }
+        return persistQrImageFile(context, temporaryFile)
+    } catch (failure: SecurityException) {
+        throw IOException("Không có quyền đọc ảnh QR đã chọn.", failure)
+    } finally {
+        temporaryFile.delete()
+    }
+}
+
+private fun persistQrImageFile(context: Context, source: File): String {
+    if (!source.isFile || source.length() == 0L) {
+        throw IOException("Không tìm thấy ảnh QR vừa chụp.")
+    }
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(source.absolutePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        throw IOException("Tệp ảnh QR không hợp lệ.")
+    }
+    var sampleSize = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 1280) {
+        sampleSize *= 2
+    }
+    val bitmap = BitmapFactory.decodeFile(
+        source.absolutePath,
+        BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    ) ?: throw IOException("Không giải mã được ảnh QR.")
+    return persistProductImage(context, null, bitmap, source.length())
 }
 
 private fun queryImageSize(context: Context, uri: Uri): Long? =
