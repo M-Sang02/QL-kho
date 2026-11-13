@@ -13,12 +13,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -42,6 +44,54 @@ internal fun DialogTitleWithClose(
         )
         IconButton(onClick = onClose) {
             Icon(Icons.Default.Close, contentDescription = "Đóng")
+        }
+    }
+}
+
+@Composable
+internal fun QrUndoBanner(
+    message: String,
+    onUndo: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val progress = remember(message) { Animatable(0f) }
+    LaunchedEffect(message) {
+        progress.animateTo(1f, animationSpec = tween(durationMillis = 3_000))
+    }
+    Surface(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp).widthIn(max = 440.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 6.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(start = 16.dp, top = 10.dp, end = 8.dp, bottom = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    message,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                TextButton(onClick = onUndo) {
+                    Icon(Icons.Default.Undo, contentDescription = null)
+                    Text(" Hoàn tác")
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Ẩn thông báo")
+                }
+            }
+            LinearProgressIndicator(
+                progress = progress.value,
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.secondaryContainer
+            )
         }
     }
 }

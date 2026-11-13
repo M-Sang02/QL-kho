@@ -96,6 +96,8 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.ExpandLess
@@ -229,6 +231,18 @@ private enum class StockUnitFilter(val title: String) {
 private data class GalleryImage(val uri: Uri, val name: String, val dateAdded: Long)
 
 private data class WarehouseInfo(val id: String, val name: String, val cloudId: String? = null)
+private data class ReceiveQrEntry(
+    val id: String,
+    val recipientName: String,
+    val accountNumber: String,
+    val bankName: String,
+    val imagePath: String?
+)
+private data class PendingQrDelete(
+    val entry: ReceiveQrEntry,
+    val index: Int,
+    val token: String = UUID.randomUUID().toString()
+)
 
 private const val DEFAULT_WAREHOUSE_ID = "default"
 
@@ -432,6 +446,53 @@ fun KhoApp(
     var savedShareCode by remember(preferences, savedShareCodePreferenceKey) {
         mutableStateOf(preferences.getString(savedShareCodePreferenceKey, null))
     }
+    val receiveQrPreferenceKey = "receive_qr_entries_${userId}_$selectedWarehouseId"
+    var receiveQrEntries by remember(preferences, receiveQrPreferenceKey) {
+        mutableStateOf(
+            decodeReceiveQrEntries(
+                preferences.getString(receiveQrPreferenceKey, null)
+            )
+        )
+    }
+    var selectedQrIndex by remember(receiveQrPreferenceKey) { mutableIntStateOf(0) }
+    var showQrEditor by remember { mutableStateOf(false) }
+    var qrEditorTargetId by remember { mutableStateOf<String?>(null) }
+    var qrEditorImagePath by remember { mutableStateOf<String?>(null) }
+    var qrEditorOriginalImagePath by remember { mutableStateOf<String?>(null) }
+    var qrEditorCreatedImages by remember { mutableStateOf<List<String>>(emptyList()) }
+    var qrActionsVisible by remember { mutableStateOf(false) }
+    var qrManagerVisible by remember { mutableStateOf(false) }
+    var pendingQrDelete by remember { mutableStateOf<PendingQrDelete?>(null) }
+    var qrUndoNotice by remember { mutableStateOf<PendingQrDelete?>(null) }
+    var qrX by remember(preferences, selectedWarehouseId) {
+        mutableFloatStateOf(
+            preferences.getFloat("${warehousePreferencesPrefix}qr_fab_x", 0f).coerceIn(0f, 1f)
+        )
+    }
+    var qrY by remember(preferences, selectedWarehouseId) {
+        mutableFloatStateOf(
+            preferences.getFloat("${warehousePreferencesPrefix}qr_fab_y", 1f).coerceIn(0f, 1f)
+        )
+    }
+    var qrImagePickerMessage by remember { mutableStateOf<String?>(null) }
+    val qrImagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val savedPath = withContext(Dispatchers.IO) {
+                        persistProductImage(context, uri, null, queryImageSize(context, uri))
+                    }
+                    qrEditorImagePath = savedPath
+                    qrEditorCreatedImages = qrEditorCreatedImages + savedPath
+                } catch (failure: IOException) {
+                    qrImagePickerMessage =
+                        "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                }
+            }
+        }
+    }
     val currentLowStockLevelsUpdated by rememberUpdatedState(currentLowStockLevels)
     val updateFabPosition by rememberUpdatedState<(Offset, Float, Float) -> Unit> { delta, width, height ->
         if (width > 0f) fabX = (fabX + delta.x / width).coerceIn(0f, 1f)
@@ -554,6 +615,35 @@ fun KhoApp(
             .putFloat("${warehousePreferencesPrefix}filter_fab_y", filterFabY)
             .apply()
     }
+    LaunchedEffect(receiveQrPreferenceKey, receiveQrEntries) {
+        preferences.edit()
+            .putString(receiveQrPreferenceKey, encodeReceiveQrEntries(receiveQrEntries))
+            .apply()
+        selectedQrIndex = selectedQrIndex.coerceIn(
+            0,
+            (receiveQrEntries.size - 1).coerceAtLeast(0)
+        )
+    }
+    LaunchedEffect(qrX, qrY) {
+        preferences.edit()
+            .putFloat("${warehousePreferencesPrefix}qr_fab_x", qrX)
+            .putFloat("${warehousePreferencesPrefix}qr_fab_y", qrY)
+            .apply()
+    }
+    LaunchedEffect(pendingQrDelete?.token) {
+        val deletion = pendingQrDelete ?: return@LaunchedEffect
+        delay(3_000L)
+        if (pendingQrDelete?.token == deletion.token) {
+            try {
+                InventoryBackup.deleteImages(listOfNotNull(deletion.entry.imagePath))
+            } catch (failure: IOException) {
+                qrImagePickerMessage =
+                    "Không dọn được ảnh QR đã xóa: ${failure.localizedMessage ?: "lỗi tệp"}"
+            }
+            pendingQrDelete = null
+            qrUndoNotice = null
+        }
+    }
 
     LaunchedEffect(vm.message) {
         val message = vm.message
@@ -674,6 +764,15 @@ fun KhoApp(
                             }
                         )
                         NavigationDrawerItem(
+                            label = { Text("Mã QR nhận tiền") },
+                            selected = tab == 9,
+                            icon = { Icon(Icons.Default.QrCode2, null) },
+                            onClick = {
+                                tab = 9
+                                scope.launch { drawerState.close() }
+                            }
+                        )
+                        NavigationDrawerItem(
                             label = { Text("Quản lý kho") },
                             selected = tab == 7,
                             icon = { Icon(Icons.Default.Warehouse, null) },
@@ -685,7 +784,7 @@ fun KhoApp(
                         NavigationDrawerItem(
                             label = { Text("Tổng quan") },
                             selected = tab == 3,
-                            icon = { Icon(Icons.Default.Home, null) },
+                            icon = { Icon(Icons.Default.Inventory2, null) },
                             onClick = {
                                 tab = 3
                                 scope.launch { drawerState.close() }
@@ -778,7 +877,11 @@ fun KhoApp(
                     },
                     title = {
                         Text(
-                            if (tab == 6) "Tìm kiếm" else appName,
+                            when (tab) {
+                                6 -> "Tìm kiếm"
+                                9 -> "Mã QR nhận tiền"
+                                else -> appName
+                            },
                             style = MaterialTheme.typography.titleLarge,
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
@@ -975,6 +1078,8 @@ fun KhoApp(
                         }
                     }
             ) {
+                val containerWidth = maxWidth
+                val containerHeight = maxHeight
                 AnimatedContent(
                     targetState = tab,
                     transitionSpec = {
@@ -1174,6 +1279,18 @@ fun KhoApp(
                         onJoin = { joinWarehouseDialog = true },
                         onManage = { warehouseAction = it }
                     )
+                    9 -> ReceiveQrScreen(
+                        entries = receiveQrEntries,
+                        selectedIndex = selectedQrIndex,
+                        onSelectIndex = { selectedQrIndex = it },
+                        onAdd = {
+                            qrEditorTargetId = null
+                            qrEditorImagePath = null
+                            qrEditorOriginalImagePath = null
+                            showQrEditor = true
+                        },
+                        onManage = { qrActionsVisible = true }
+                    )
                     else -> Reports(
                         products,
                         orders,
@@ -1203,6 +1320,29 @@ fun KhoApp(
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
                     )
                 }
+                qrUndoNotice?.let { deletion ->
+                    QrUndoBanner(
+                        message = "Đã xóa tab “${deletion.entry.recipientName}”",
+                        onUndo = {
+                            receiveQrEntries = receiveQrEntries.toMutableList().apply {
+                                add(deletion.index.coerceIn(0, size), deletion.entry)
+                            }
+                            pendingQrDelete = null
+                            qrUndoNotice = null
+                        },
+                        onDismiss = {
+                            qrUndoNotice = null
+                        },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                    )
+                }
+                qrImagePickerMessage?.let { message ->
+                    ProductAddedBanner(
+                        message = message,
+                        onDismiss = { qrImagePickerMessage = null },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                    )
+                }
                 if (tab == 0 || tab == 8) {
                     val fabSize = 56.dp
                     val fabMargin = 16.dp
@@ -1217,7 +1357,7 @@ fun KhoApp(
                                     (maxHeight - fabSize - fabMargin * 2).coerceAtLeast(0.dp) * fabY
                             )
                             .size(fabSize)
-                            .pointerInput(maxWidth, maxHeight) {
+                            .pointerInput(containerWidth, containerHeight) {
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
                                     val downAt = SystemClock.uptimeMillis()
@@ -1243,12 +1383,12 @@ fun KhoApp(
                                             dragging = true
                                             val availableWidth =
                                                 with(density) {
-                                                    (maxWidth - fabSize - fabMargin * 2)
+                                                    (containerWidth - fabSize - fabMargin * 2)
                                                         .coerceAtLeast(0.dp).toPx()
                                                 }
                                             val availableHeight =
                                                 with(density) {
-                                                    (maxHeight - fabSize - fabMargin * 2)
+                                                    (containerHeight - fabSize - fabMargin * 2)
                                                         .coerceAtLeast(0.dp).toPx()
                                                 }
                                             updateFabPosition(
@@ -1269,7 +1409,76 @@ fun KhoApp(
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để thêm sản phẩm",
-                            tint = MaterialTheme.colorScheme.onPrimary
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    FloatingActionButton(
+                        onClick = { tab = 9 },
+                        modifier = Modifier
+                            .offset(
+                                x = fabMargin +
+                                    (containerWidth - fabSize - fabMargin * 2)
+                                        .coerceAtLeast(0.dp) * qrX,
+                                y = fabMargin +
+                                    (containerHeight - fabSize - fabMargin * 2)
+                                        .coerceAtLeast(0.dp) * qrY
+                            )
+                            .size(fabSize)
+                            .pointerInput(containerWidth, containerHeight) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    val downAt = SystemClock.uptimeMillis()
+                                    var dragging = false
+                                    var finished = false
+                                    while (!finished) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull {
+                                            it.id == down.id
+                                        }
+                                        if (change == null) {
+                                            finished = true
+                                        } else if (!change.pressed) {
+                                            if (!dragging &&
+                                                SystemClock.uptimeMillis() - downAt < 1_000L
+                                            ) {
+                                                tab = 9
+                                            }
+                                            finished = true
+                                        } else if (
+                                            SystemClock.uptimeMillis() - downAt >= 1_000L
+                                        ) {
+                                            dragging = true
+                                            val availableWidth = with(density) {
+                                                (containerWidth - fabSize - fabMargin * 2)
+                                                    .coerceAtLeast(0.dp).toPx()
+                                            }
+                                            val availableHeight = with(density) {
+                                                (containerHeight - fabSize - fabMargin * 2)
+                                                    .coerceAtLeast(0.dp).toPx()
+                                            }
+                                            if (availableWidth > 0f) {
+                                                qrX = (
+                                                    qrX + change.positionChange().x / availableWidth
+                                                    ).coerceIn(0f, 1f)
+                                            }
+                                            if (availableHeight > 0f) {
+                                                qrY = (
+                                                    qrY + change.positionChange().y / availableHeight
+                                                    ).coerceIn(0f, 1f)
+                                            }
+                                            change.consume()
+                                        }
+                                    }
+                                }
+                            },
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    ) {
+                        Icon(
+                            Icons.Default.QrCode2,
+                            contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để mở mã QR",
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 } else if (tab == 6) {
@@ -1295,7 +1504,7 @@ fun KhoApp(
                                         filterFabY
                                 )
                                 .size(fabSize)
-                                .pointerInput(maxWidth, maxHeight) {
+                                .pointerInput(containerWidth, containerHeight) {
                                     awaitEachGesture {
                                         val down = awaitFirstDown(requireUnconsumed = false)
                                         val downAt = SystemClock.uptimeMillis()
@@ -1320,11 +1529,11 @@ fun KhoApp(
                                             ) {
                                                 dragging = true
                                                 val availableWidth = with(density) {
-                                                    (maxWidth - fabSize - fabMargin * 2)
+                                                    (containerWidth - fabSize - fabMargin * 2)
                                                         .coerceAtLeast(0.dp).toPx()
                                                 }
                                                 val availableHeight = with(density) {
-                                                    (maxHeight - fabSize - fabMargin * 2)
+                                                    (containerHeight - fabSize - fabMargin * 2)
                                                         .coerceAtLeast(0.dp).toPx()
                                                 }
                                                 if (availableWidth > 0f) {
@@ -1347,7 +1556,8 @@ fun KhoApp(
                         ) {
                             Icon(
                                 Icons.Default.FilterList,
-                                contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để lọc"
+                                contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để lọc",
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
@@ -1434,6 +1644,124 @@ fun KhoApp(
                 onSortFieldChange = { sortField = it },
                 onSortAscendingChange = { sortAscending = it },
                 onDismiss = { filterDialogVisible = false }
+            )
+        }
+        if (qrActionsVisible) {
+            QrActionsDialog(
+                hasEntries = receiveQrEntries.isNotEmpty(),
+                onAdd = {
+                    qrActionsVisible = false
+                    qrEditorTargetId = null
+                    qrEditorImagePath = null
+                    qrEditorOriginalImagePath = null
+                    qrEditorCreatedImages = emptyList()
+                    showQrEditor = true
+                },
+                onEdit = {
+                    qrActionsVisible = false
+                    qrManagerVisible = true
+                },
+                onDismiss = { qrActionsVisible = false }
+            )
+        }
+        if (qrManagerVisible) {
+            QrManagerDialog(
+                entries = receiveQrEntries,
+                onEdit = { entry ->
+                    qrManagerVisible = false
+                    qrEditorTargetId = entry.id
+                    qrEditorImagePath = entry.imagePath
+                    qrEditorOriginalImagePath = entry.imagePath
+                    qrEditorCreatedImages = emptyList()
+                    showQrEditor = true
+                },
+                onDelete = { entry, index ->
+                    val selectedEntryId = receiveQrEntries.getOrNull(selectedQrIndex)?.id
+                    pendingQrDelete?.let { previous ->
+                        try {
+                            InventoryBackup.deleteImages(
+                                listOfNotNull(previous.entry.imagePath)
+                            )
+                        } catch (failure: IOException) {
+                            qrImagePickerMessage =
+                                "Không dọn được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                        }
+                    }
+                    val deletion = PendingQrDelete(entry, index)
+                    pendingQrDelete = deletion
+                    qrUndoNotice = deletion
+                    receiveQrEntries = receiveQrEntries.filterNot { it.id == entry.id }
+                    selectedQrIndex = if (selectedEntryId == entry.id) {
+                        (index - 1).coerceAtLeast(0)
+                    } else {
+                        receiveQrEntries.indexOfFirst { it.id == selectedEntryId }.coerceAtLeast(0)
+                    }
+                    qrManagerVisible = false
+                },
+                onDismiss = { qrManagerVisible = false }
+            )
+        }
+        if (showQrEditor) {
+            val existingQr = receiveQrEntries.firstOrNull { it.id == qrEditorTargetId }
+            QrEntryDialog(
+                initialEntry = existingQr,
+                imagePath = qrEditorImagePath,
+                onPickImage = { qrImagePicker.launch("image/*") },
+                onDismiss = {
+                    try {
+                        InventoryBackup.deleteImages(
+                            qrEditorCreatedImages.filter { it != qrEditorOriginalImagePath }
+                        )
+                    } catch (failure: IOException) {
+                        qrImagePickerMessage =
+                            "Không dọn được ảnh QR tạm: ${failure.localizedMessage ?: "lỗi tệp"}"
+                    }
+                    qrEditorCreatedImages = emptyList()
+                    showQrEditor = false
+                },
+                onSave = { recipient, account, bank, imagePath ->
+                    val savedEntry = if (existingQr == null) {
+                        ReceiveQrEntry(
+                            id = UUID.randomUUID().toString(),
+                            recipientName = recipient,
+                            accountNumber = account,
+                            bankName = bank,
+                            imagePath = imagePath
+                        )
+                    } else {
+                        existingQr.copy(
+                            recipientName = recipient,
+                            accountNumber = account,
+                            bankName = bank,
+                            imagePath = imagePath
+                        )
+                    }
+                    receiveQrEntries = if (existingQr == null) {
+                        receiveQrEntries + savedEntry
+                    } else {
+                        receiveQrEntries.map {
+                            if (it.id == savedEntry.id) savedEntry else it
+                        }
+                    }
+                    selectedQrIndex = receiveQrEntries.indexOfFirst { it.id == savedEntry.id }
+                        .coerceAtLeast(0)
+                    try {
+                        InventoryBackup.deleteImages(
+                            qrEditorCreatedImages.filter { it != imagePath }
+                        )
+                        if (
+                            existingQr?.imagePath != null &&
+                            existingQr.imagePath != imagePath
+                        ) {
+                            InventoryBackup.deleteImages(listOf(existingQr.imagePath))
+                        }
+                    } catch (failure: IOException) {
+                        qrImagePickerMessage =
+                            "Không dọn được ảnh QR cũ: ${failure.localizedMessage ?: "lỗi tệp"}"
+                    }
+                    qrEditorCreatedImages = emptyList()
+                    showQrEditor = false
+                }
             )
         }
         if (showSharedImageDialog && sharedImageUri != null) {
@@ -1983,6 +2311,327 @@ private fun encodeWarehouses(warehouses: List<WarehouseInfo>): String =
             )
         }
     }.toString()
+
+private fun decodeReceiveQrEntries(serialized: String?): List<ReceiveQrEntry> {
+    if (serialized.isNullOrBlank()) return emptyList()
+    return try {
+        val rows = JSONArray(serialized)
+        List(rows.length()) { index ->
+            val row = rows.getJSONObject(index)
+            ReceiveQrEntry(
+                id = row.getString("id"),
+                recipientName = row.getString("recipientName"),
+                accountNumber = row.getString("accountNumber"),
+                bankName = row.getString("bankName"),
+                imagePath = if (row.isNull("imagePath")) null else {
+                    row.getString("imagePath").takeIf { it.isNotBlank() }
+                }
+            )
+        }
+    } catch (failure: JSONException) {
+        emptyList()
+    }
+}
+
+private fun encodeReceiveQrEntries(entries: List<ReceiveQrEntry>): String =
+    JSONArray().apply {
+        entries.forEach { entry ->
+            put(
+                JSONObject()
+                    .put("id", entry.id)
+                    .put("recipientName", entry.recipientName)
+                    .put("accountNumber", entry.accountNumber)
+                    .put("bankName", entry.bankName)
+                    .put("imagePath", entry.imagePath ?: JSONObject.NULL)
+            )
+        }
+    }.toString()
+
+@Composable
+private fun ReceiveQrScreen(
+    entries: List<ReceiveQrEntry>,
+    selectedIndex: Int,
+    onSelectIndex: (Int) -> Unit,
+    onAdd: () -> Unit,
+    onManage: () -> Unit
+) {
+    val selectedEntry = entries.getOrNull(selectedIndex)
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        if (selectedEntry == null) {
+            EmptyState("Chưa có mã QR nhận tiền.")
+            Button(onClick = onAdd) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Text("  Thêm mã QR")
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(
+                    onClick = {
+                        onSelectIndex((selectedIndex - 1 + entries.size) % entries.size)
+                    },
+                    enabled = entries.size > 1
+                ) {
+                    Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Mã QR trước")
+                }
+                Text(
+                    "${selectedIndex + 1} / ${entries.size}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                IconButton(
+                    onClick = { onSelectIndex((selectedIndex + 1) % entries.size) },
+                    enabled = entries.size > 1
+                ) {
+                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Mã QR tiếp theo")
+                }
+            }
+            Box(
+                modifier = Modifier.size(260.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                if (selectedEntry.imagePath != null) {
+                    AsyncImage(
+                        model = File(selectedEntry.imagePath),
+                        contentDescription = "Mã QR của ${selectedEntry.recipientName}",
+                        modifier = Modifier.fillMaxSize().padding(12.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.QrCode2,
+                        contentDescription = "Chưa thêm ảnh mã QR",
+                        modifier = Modifier.size(112.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            QrInformationCard("Người nhận", selectedEntry.recipientName)
+            QrInformationCard("Số tài khoản", selectedEntry.accountNumber)
+            QrInformationCard("Ngân hàng", selectedEntry.bankName)
+            OutlinedButton(onClick = onManage) {
+                Icon(Icons.Default.Edit, contentDescription = null)
+                Text("  Quản lý mã QR")
+            }
+        }
+    }
+}
+
+@Composable
+private fun QrInformationCard(label: String, value: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        )
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text(value, style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+@Composable
+private fun QrActionsDialog(
+    hasEntries: Boolean,
+    onAdd: () -> Unit,
+    onEdit: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { DialogTitleWithClose("Quản lý mã QR", onDismiss) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Text("  Thêm QR")
+                }
+                OutlinedButton(
+                    onClick = onEdit,
+                    enabled = hasEntries,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null)
+                    Text("  Sửa QR")
+                }
+            }
+        },
+        confirmButton = {}
+    )
+}
+
+@Composable
+private fun QrManagerDialog(
+    entries: List<ReceiveQrEntry>,
+    onEdit: (ReceiveQrEntry) -> Unit,
+    onDelete: (ReceiveQrEntry, Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var menuEntryId by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { DialogTitleWithClose("Các tab mã QR", onDismiss) },
+        text = {
+            if (entries.isEmpty()) {
+                EmptyState("Chưa có mã QR để sửa.")
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(entries, key = { it.id }) { entry ->
+                        Card {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(start = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.QrCode2, contentDescription = null)
+                                Column(Modifier.weight(1f).padding(10.dp)) {
+                                    Text(entry.recipientName, style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        "${entry.bankName} · ${entry.accountNumber}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                Box {
+                                    IconButton(onClick = { menuEntryId = entry.id }) {
+                                        Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn QR")
+                                    }
+                                    DropdownMenu(
+                                        expanded = menuEntryId == entry.id,
+                                        onDismissRequest = { menuEntryId = null }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Sửa") },
+                                            onClick = {
+                                                menuEntryId = null
+                                                onEdit(entry)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Xóa") },
+                                            onClick = {
+                                                menuEntryId = null
+                                                onDelete(entry, entries.indexOf(entry))
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Đóng") }
+        }
+    )
+}
+
+@Composable
+private fun QrEntryDialog(
+    initialEntry: ReceiveQrEntry?,
+    imagePath: String?,
+    onPickImage: () -> Unit,
+    onSave: (recipient: String, account: String, bank: String, imagePath: String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var recipient by remember(initialEntry?.id) {
+        mutableStateOf(initialEntry?.recipientName.orEmpty())
+    }
+    var account by remember(initialEntry?.id) {
+        mutableStateOf(initialEntry?.accountNumber.orEmpty())
+    }
+    var bank by remember(initialEntry?.id) {
+        mutableStateOf(initialEntry?.bankName.orEmpty())
+    }
+    var error by remember(initialEntry?.id) { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            DialogTitleWithClose(
+                if (initialEntry == null) "Thêm mã QR" else "Sửa mã QR",
+                onDismiss
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(180.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (imagePath != null) {
+                        AsyncImage(
+                            model = File(imagePath),
+                            contentDescription = "Ảnh mã QR",
+                            modifier = Modifier.fillMaxSize().padding(8.dp),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.QrCode2,
+                            contentDescription = "Chọn ảnh mã QR",
+                            modifier = Modifier.size(80.dp)
+                        )
+                    }
+                }
+                OutlinedButton(onClick = onPickImage, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.PhotoLibrary, contentDescription = null)
+                    Text(if (imagePath == null) "  Chọn ảnh mã QR" else "  Thay ảnh mã QR")
+                }
+                OutlinedTextField(
+                    value = recipient,
+                    onValueChange = { recipient = it },
+                    label = { Text("Tên người nhận") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = account,
+                    onValueChange = { account = it },
+                    label = { Text("Số tài khoản") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                OutlinedTextField(
+                    value = bank,
+                    onValueChange = { bank = it },
+                    label = { Text("Ngân hàng") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (recipient.isBlank() || account.isBlank() || bank.isBlank()) {
+                    error = "Nhập đầy đủ tên người nhận, số tài khoản và ngân hàng."
+                } else {
+                    onSave(recipient.trim(), account.trim(), bank.trim(), imagePath)
+                }
+            }) { Text("Lưu") }
+        }
+    )
+}
 
 @Composable
 private fun StockHistoryScreen(movements: List<StockMovementView>) {
@@ -2829,7 +3478,7 @@ private fun ProductGridCard(
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 34.dp)
-                    .pointerInput(product.id, imageIndex) {
+                    .pointerInput(product.id) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             val held = withTimeoutOrNull(2_000L) {
@@ -2932,6 +3581,76 @@ private fun ProductGridCard(
 }
 
 @Composable
+private fun ProductImageItem(
+    path: String,
+    index: Int,
+    count: Int,
+    isMain: Boolean,
+    onMove: (targetIndex: Int) -> Unit,
+    onDelete: () -> Unit
+) {
+    val latestIndex by rememberUpdatedState(index)
+    val latestCount by rememberUpdatedState(count)
+    val latestOnMove by rememberUpdatedState(onMove)
+    val density = LocalDensity.current
+    val dragModifier = Modifier.pointerInput(path) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val downAt = SystemClock.uptimeMillis()
+            var totalDragX = 0f
+            var finished = false
+            while (!finished) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id }
+                if (change == null || !change.pressed) {
+                    finished = true
+                } else {
+                    val elapsed = SystemClock.uptimeMillis() - downAt
+                    if (elapsed >= 1_000L) {
+                        totalDragX += change.positionChange().x
+                        val slotWidth = with(density) { 84.dp.toPx() }
+                        if (totalDragX >= slotWidth && latestIndex < latestCount - 1) {
+                            latestOnMove(latestIndex + 1)
+                            totalDragX = 0f
+                        } else if (totalDragX <= -slotWidth && latestIndex > 0) {
+                            latestOnMove(latestIndex - 1)
+                            totalDragX = 0f
+                        }
+                        change.consume()
+                    }
+                }
+            }
+        }
+    }
+    Box(Modifier.size(76.dp)) {
+        ProductImage(path, Modifier.fillMaxSize().then(dragModifier))
+        if (isMain) {
+            Text(
+                "Ảnh chính",
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.88f))
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                color = MaterialTheme.colorScheme.onPrimary,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        IconButton(
+            onClick = onDelete,
+            modifier = Modifier.align(Alignment.TopEnd)
+                .size(28.dp)
+                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+        ) {
+            Icon(
+                Icons.Default.Close,
+                contentDescription = "Xóa ảnh",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun ProductImageViewer(product: Product, onDismiss: () -> Unit) {
     val imagePaths = remember(product.id, product.imagePath, product.additionalImagePaths) {
         listOfNotNull(product.imagePath) + product.additionalImagePaths
@@ -2957,7 +3676,7 @@ private fun ProductImageViewer(product: Product, onDismiss: () -> Unit) {
                     contentDescription = product.name,
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(product.id) {
+                        .pointerInput(product.id, imageIndex) {
                             detectTransformGestures { _, panChange, zoomChange, _ ->
                                 scale = (scale * zoomChange).coerceIn(1f, 5f)
                                 pan = if (scale == 1f) Offset.Zero else pan + panChange
@@ -4892,22 +5611,26 @@ private fun ProductDialog(
     var openingStock by remember(product?.id) { mutableStateOf("0") }
     var buyPrice by remember(product?.id) { mutableStateOf("0") }
     var sellPrice by remember(product?.id) { mutableStateOf("0") }
-    var imagePath by remember(product?.id) { mutableStateOf(product?.imagePath) }
-    var additionalImagePaths by remember(product?.id) {
-        mutableStateOf(product?.additionalImagePaths.orEmpty())
+    var imagePaths by remember(product?.id) {
+        mutableStateOf(listOfNotNull(product?.imagePath) + product?.additionalImagePaths.orEmpty())
     }
     var error by remember { mutableStateOf<String?>(null) }
     var savingImage by remember { mutableStateOf(false) }
-    var showGallery by remember { mutableStateOf(false) }
     var cropUri by remember { mutableStateOf<Uri?>(null) }
     var cropBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var cropIsAdditional by remember { mutableStateOf(false) }
-    var pendingAdditionalUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingImageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var imageSourceSizeBytes by remember { mutableStateOf<Long?>(null) }
     var cameraCaptureFile by remember { mutableStateOf<File?>(null) }
     var cameraCaptureUri by remember { mutableStateOf<Uri?>(null) }
-    var cameraCaptureIsAdditional by remember { mutableStateOf(false) }
     var createdImagePaths by remember(product?.id) { mutableStateOf(emptyList<String>()) }
+
+    fun openNextQueuedImage() {
+        val next = pendingImageUris.firstOrNull() ?: return
+        pendingImageUris = pendingImageUris.drop(1)
+        cropUri = next
+        cropBitmap = null
+        imageSourceSizeBytes = queryImageSize(context, next)
+    }
 
     fun cleanupNewImages(retainedPaths: Set<String>) {
         val unusedPaths = createdImagePaths.filterNot { it in retainedPaths }
@@ -4924,7 +5647,7 @@ private fun ProductDialog(
         onDismiss()
     }
 
-    fun saveImage(bitmap: Bitmap, asAdditional: Boolean, onSaved: () -> Unit = {}) {
+    fun saveImage(bitmap: Bitmap, onSaved: () -> Unit = {}) {
         val sourceSize = imageSourceSizeBytes
         scope.launch {
             savingImage = true
@@ -4932,11 +5655,7 @@ private fun ProductDialog(
                 val savedPath = withContext(Dispatchers.IO) {
                     persistProductImage(context, null, bitmap, sourceSize)
                 }
-                if (asAdditional) {
-                    additionalImagePaths = additionalImagePaths + savedPath
-                } else {
-                    imagePath = savedPath
-                }
+                imagePaths = (imagePaths + savedPath).distinct().take(11)
                 createdImagePaths = createdImagePaths + savedPath
                 error = null
                 onSaved()
@@ -4948,46 +5667,29 @@ private fun ProductDialog(
         }
     }
 
-    fun prepareAdditionalImages(uris: List<Uri>) {
-        val remainingSlots = 10 - additionalImagePaths.size
-        if (uris.size > remainingSlots) {
-            error = "Mỗi sản phẩm có thể có tối đa 10 ảnh phụ."
+    fun prepareProductImages(uris: List<Uri>) {
+        if (imagePaths.size + uris.size > 11) {
+            error = "Mỗi sản phẩm có thể có tối đa 11 ảnh."
             return
         }
-        val first = uris.firstOrNull() ?: return
-        pendingAdditionalUris = uris.drop(1)
-        cropIsAdditional = true
-        cropUri = first
-        cropBitmap = null
-        imageSourceSizeBytes = queryImageSize(context, first)
+        pendingImageUris = uris
+        openNextQueuedImage()
     }
 
     LaunchedEffect(initialImageUri) {
         if (initialImageUri != null) {
-            cropIsAdditional = false
             cropUri = initialImageUri
             cropBitmap = null
             imageSourceSizeBytes = queryImageSize(context, initialImageUri)
         }
     }
 
-    val galleryPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (hasGalleryPermission(context)) {
-            showGallery = true
-        } else {
-            error = if (results.isEmpty()) "Không thể mở quyền truy cập ảnh."
-            else "Cần cho phép truy cập ảnh để chọn ảnh trong thư viện."
-        }
-    }
     val cameraPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
     ) { captured ->
         val captureFile = cameraCaptureFile
         if (captured && captureFile?.isFile == true) {
             cropUri = cameraCaptureUri
-            cropIsAdditional = cameraCaptureIsAdditional
             imageSourceSizeBytes = captureFile.length()
             cropBitmap = null
         } else {
@@ -4997,14 +5699,14 @@ private fun ProductDialog(
             if (!captured) error = "Không chụp được ảnh."
         }
     }
-    val additionalGalleryPicker = rememberLauncherForActivityResult(
+    val galleryPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
     ) { uris ->
-        prepareAdditionalImages(uris)
+        prepareProductImages(uris)
     }
-    fun captureImage(asAdditional: Boolean = false) {
-        if (asAdditional && additionalImagePaths.size >= 10) {
-            error = "Mỗi sản phẩm có thể có tối đa 10 ảnh phụ."
+    fun captureImage() {
+        if (imagePaths.size >= 11) {
+            error = "Mỗi sản phẩm có thể có tối đa 11 ảnh."
             return
         }
         try {
@@ -5014,7 +5716,6 @@ private fun ProductDialog(
             }
             val file = File.createTempFile("capture_", ".jpg", directory)
             cameraCaptureFile = file
-            cameraCaptureIsAdditional = asAdditional
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -5028,20 +5729,12 @@ private fun ProductDialog(
             error = "Không thể tạo địa chỉ ảnh tạm."
         }
     }
-    fun chooseGalleryImage() {
-        if (hasGalleryPermission(context)) {
-            showGallery = true
-        } else {
-            galleryPermissionLauncher.launch(galleryPermissionNames())
-        }
-    }
-
     AlertDialog(
-        onDismissRequest = ::dismissProductDialog,
+        onDismissRequest = { dismissProductDialog() },
         title = {
             DialogTitleWithClose(
                 if (product == null) "Thêm sản phẩm" else "Sửa sản phẩm",
-                ::dismissProductDialog
+                { dismissProductDialog() }
             )
         },
         text = {
@@ -5054,11 +5747,11 @@ private fun ProductDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    ProductImage(imagePath, Modifier.size(76.dp))
+                    ProductImage(imagePaths.firstOrNull(), Modifier.size(76.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         OutlinedButton(
-                            onClick = { chooseGalleryImage() },
-                            enabled = !savingImage
+                            onClick = { galleryPicker.launch("image/*") },
+                            enabled = !savingImage && imagePaths.size < 11
                         ) {
                             Icon(Icons.Default.PhotoLibrary, contentDescription = null)
                             Spacer(Modifier.size(8.dp))
@@ -5066,63 +5759,35 @@ private fun ProductDialog(
                         }
                         OutlinedButton(
                             onClick = { captureImage() },
-                            enabled = !savingImage
+                            enabled = !savingImage && imagePaths.size < 11
                         ) {
                             Icon(Icons.Default.PhotoCamera, contentDescription = null)
                             Text("Chụp ảnh")
                         }
                     }
                 }
-                Text(
-                    "Ảnh phụ (${additionalImagePaths.size}/10)",
-                    style = MaterialTheme.typography.titleSmall
-                )
-                if (additionalImagePaths.isNotEmpty()) {
+                Text("Danh sách ảnh (${imagePaths.size}/11) · nhấn giữ để sắp xếp", style = MaterialTheme.typography.titleSmall)
+                if (imagePaths.isNotEmpty()) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(additionalImagePaths) { path ->
-                            Box(Modifier.size(76.dp)) {
-                                ProductImage(path, Modifier.fillMaxSize())
-                                IconButton(
-                                    onClick = {
-                                        additionalImagePaths =
-                                            additionalImagePaths.filterNot { it == path }
-                                    },
-                                    modifier = Modifier.align(Alignment.TopEnd)
-                                        .size(28.dp)
-                                        .background(
-                                            Color.Black.copy(alpha = 0.6f),
-                                            CircleShape
-                                        )
-                                ) {
-                                    Icon(
-                                        Icons.Default.Close,
-                                        contentDescription = "Xóa ảnh phụ",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
+                        items(imagePaths, key = { it }) { path ->
+                            val index = imagePaths.indexOf(path)
+                            ProductImageItem(
+                                path = path,
+                                index = index,
+                                count = imagePaths.size,
+                                isMain = index == 0,
+                                onMove = { targetIndex ->
+                                    val fromIndex = imagePaths.indexOf(path)
+                                    if (fromIndex >= 0 && targetIndex in imagePaths.indices) {
+                                        val reordered = imagePaths.toMutableList()
+                                        val moved = reordered.removeAt(fromIndex)
+                                        reordered.add(targetIndex.coerceIn(0, reordered.size), moved)
+                                        imagePaths = reordered
+                                    }
+                                },
+                                onDelete = { imagePaths = imagePaths.filterNot { it == path } }
+                            )
                         }
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { additionalGalleryPicker.launch("image/*") },
-                        enabled = !savingImage && additionalImagePaths.size < 10
-                    ) {
-                        Icon(Icons.Default.PhotoLibrary, contentDescription = null)
-                        Spacer(Modifier.size(6.dp))
-                        Text("Chọn nhiều ảnh")
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { captureImage(asAdditional = true) },
-                        enabled = !savingImage && additionalImagePaths.size < 10
-                    ) {
-                        Icon(Icons.Default.PhotoCamera, contentDescription = null)
-                        Spacer(Modifier.size(6.dp))
-                        Text("Thêm ảnh chụp")
                     }
                 }
                 OutlinedTextField(
@@ -5196,14 +5861,12 @@ private fun ProductDialog(
                         else -> null
                     }
                     if (error == null) {
-                        cleanupNewImages(
-                            setOfNotNull(imagePath) + additionalImagePaths
-                        )
+                        cleanupNewImages(imagePaths.toSet())
                         vm.updateProduct(
                             product.id,
                             name,
-                            imagePath,
-                            additionalImagePaths
+                            imagePaths.firstOrNull(),
+                            imagePaths.drop(1)
                         )
                         onDismiss()
                     }
@@ -5229,17 +5892,15 @@ private fun ProductDialog(
                     }
                     if (error == null) {
                         if (duplicate == null) {
-                            cleanupNewImages(
-                                setOfNotNull(imagePath) + additionalImagePaths
-                            )
+                            cleanupNewImages(imagePaths.toSet())
                             vm.saveProduct(
                                 name,
                                 unitType,
                                 openingStock,
                                 buyPrice,
                                 sellPrice,
-                                imagePath,
-                                additionalImagePaths
+                                imagePaths.firstOrNull(),
+                                imagePaths.drop(1)
                             )
                         } else {
                             val matchingBranch = duplicate.branches.firstOrNull {
@@ -5254,20 +5915,15 @@ private fun ProductDialog(
                                 }
                                 else -> {
                                     if (
-                                        imagePath != null ||
-                                        additionalImagePaths.isNotEmpty()
+                                        imagePaths.isNotEmpty()
                                     ) {
-                                        cleanupNewImages(
-                                            setOfNotNull(imagePath) + additionalImagePaths
-                                        )
+                                        cleanupNewImages(imagePaths.toSet())
                                         vm.updateProduct(
                                             duplicate.id,
                                             duplicate.name,
-                                            imagePath ?: duplicate.imagePath,
-                                            (
-                                                duplicate.additionalImagePaths +
-                                                    additionalImagePaths
-                                                ).distinct()
+                                            imagePaths.firstOrNull() ?: duplicate.imagePath,
+                                            (imagePaths.drop(1) + duplicate.additionalImagePaths)
+                                                .distinct().take(10)
                                         )
                                     }
                                     vm.mergeDuplicateProduct(
@@ -5284,18 +5940,6 @@ private fun ProductDialog(
             }) { Text(if (product == null) "Lưu sản phẩm" else "Lưu thay đổi") }
         },
     )
-    if (showGallery) {
-        AppGalleryPicker(
-            onDismiss = { showGallery = false },
-            onSelect = { uri ->
-                showGallery = false
-                cropIsAdditional = false
-                cropUri = uri
-                cropBitmap = null
-                imageSourceSizeBytes = queryImageSize(context, uri)
-            }
-        )
-    }
     if (cropUri != null || cropBitmap != null) {
         PhotoCropDialog(
             sourceUri = cropUri,
@@ -5303,7 +5947,7 @@ private fun ProductDialog(
             onDismiss = {
                 cropUri = null
                 cropBitmap = null
-                pendingAdditionalUris = emptyList()
+                pendingImageUris = emptyList()
                 cameraCaptureFile?.delete()
                 cameraCaptureFile = null
                 cameraCaptureUri = null
@@ -5311,16 +5955,7 @@ private fun ProductDialog(
             onCropComplete = { bitmap ->
                 cropUri = null
                 cropBitmap = null
-                val wasAdditional = cropIsAdditional
-                val nextAdditionalUri = pendingAdditionalUris.firstOrNull()
-                pendingAdditionalUris = pendingAdditionalUris.drop(1)
-                saveImage(bitmap, wasAdditional) {
-                    if (wasAdditional && nextAdditionalUri != null) {
-                        prepareAdditionalImages(
-                            listOf(nextAdditionalUri) + pendingAdditionalUris
-                        )
-                    }
-                }
+                saveImage(bitmap) { openNextQueuedImage() }
                 cameraCaptureFile?.delete()
                 cameraCaptureFile = null
                 cameraCaptureUri = null
