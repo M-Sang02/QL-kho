@@ -12,6 +12,13 @@ pluginManagement {
         id("com.google.gms.google-services") version "4.4.2"
     }
 }
-dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://jitpack.io")
+    }
+}
 rootProject.name = "QL-kho"
 include(":app")

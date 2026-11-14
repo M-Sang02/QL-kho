@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -169,14 +170,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.border
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import eightbitlab.com.blurview.BlurView
 import android.widget.Toast
 import coil.compose.AsyncImage
 import com.kho.glass.data.InventoryBackup
@@ -343,6 +347,10 @@ fun KhoApp(
                         BottomTabStyle.STANDARD.name
                     )
                 } ?: BottomTabStyle.STANDARD,
+                bottomTabHeightDp = preferences.getFloat("bottom_tab_height_dp", 60f)
+                    .coerceIn(48f, 72f),
+                bottomTabSpacingDp = preferences.getFloat("bottom_tab_spacing_dp", 10f)
+                    .coerceIn(0f, 24f),
                 glassEffectEnabled = preferences.getBoolean("glass_effect_enabled", true)
             )
         )
@@ -488,6 +496,13 @@ fun KhoApp(
     }
     var qrImagePickerMessage by remember { mutableStateOf<String?>(null) }
     var qrCameraFile by remember { mutableStateOf<File?>(null) }
+    var qrCropFile by remember { mutableStateOf<File?>(null) }
+    var qrCropUri by remember { mutableStateOf<Uri?>(null) }
+    var qrCropSourceSize by remember { mutableStateOf<Long?>(null) }
+    DisposableEffect(qrCropFile) {
+        val cropFile = qrCropFile
+        onDispose { cropFile?.delete() }
+    }
     val qrImagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetMultipleContents()
     ) { uris ->
@@ -497,16 +512,27 @@ fun KhoApp(
             val uri = uris.firstOrNull() ?: return@rememberLauncherForActivityResult
             scope.launch {
                 try {
-                    val savedPath = withContext(Dispatchers.IO) {
-                        importQrImage(context, uri)
+                    val cropFile = withContext(Dispatchers.IO) {
+                        copyQrImageToCropCache(context, uri)
                     }
-                    qrEditorImagePath = savedPath
-                    qrEditorCreatedImages = qrEditorCreatedImages + savedPath
+                    qrCropFile?.delete()
+                    qrCropFile = cropFile
+                    qrCropSourceSize = cropFile.length()
+                    qrCropUri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        cropFile
+                    )
                 } catch (failure: IOException) {
                     qrImagePickerMessage =
-                        "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
+                        "Không mở được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
                 } catch (failure: SecurityException) {
                     qrImagePickerMessage = "Không có quyền đọc ảnh QR đã chọn."
+                } catch (failure: IllegalArgumentException) {
+                    qrCropFile?.delete()
+                    qrCropFile = null
+                    qrCropUri = null
+                    qrImagePickerMessage = "Không thể mở ảnh QR đã chọn."
                 }
             }
         }
@@ -516,25 +542,24 @@ fun KhoApp(
         ActivityResultContracts.TakePicture()
     ) { captured ->
         val file = qrCameraFile
-            if (captured && file?.isFile == true) {
-            scope.launch {
-                try {
-                    val savedPath = withContext(Dispatchers.IO) {
-                        persistQrImageFile(context, file)
-                    }
-                    qrEditorImagePath = savedPath
-                    qrEditorCreatedImages = qrEditorCreatedImages + savedPath
-                } catch (failure: IOException) {
-                    qrImagePickerMessage =
-                        "Không lưu được ảnh QR: ${failure.localizedMessage ?: "lỗi tệp"}"
-                } finally {
-                    file.delete()
-                    qrCameraFile = null
-                }
+        qrCameraFile = null
+        if (captured && file?.isFile == true) {
+            qrCropFile?.delete()
+            qrCropFile = file
+            qrCropSourceSize = file.length()
+            try {
+                qrCropUri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+            } catch (failure: IllegalArgumentException) {
+                file.delete()
+                qrCropFile = null
+                qrImagePickerMessage = "Không thể mở ảnh vừa chụp."
             }
         } else {
             file?.delete()
-            qrCameraFile = null
             if (!captured) qrImagePickerMessage = "Không chụp được ảnh mã QR."
         }
     }
@@ -638,6 +663,8 @@ fun KhoApp(
             .putString("text_hex", appearance.textHex)
             .putBoolean("custom_text_enabled", appearance.customTextEnabled)
             .putString("bottom_tab_style", appearance.bottomTabStyle.name)
+            .putFloat("bottom_tab_height_dp", appearance.bottomTabHeightDp)
+            .putFloat("bottom_tab_spacing_dp", appearance.bottomTabSpacingDp)
             .putBoolean("glass_effect_enabled", appearance.glassEffectEnabled)
             .apply()
     }
@@ -783,7 +810,9 @@ fun KhoApp(
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
-                ModalDrawerSheet {
+                ModalDrawerSheet(
+                    drawerContainerColor = MaterialTheme.colorScheme.background
+                ) {
                     Column(
                         Modifier.fillMaxHeight().verticalScroll(rememberScrollState())
                     ) {
@@ -880,7 +909,7 @@ fun KhoApp(
                             }
                         )
                         NavigationDrawerItem(
-                            label = { Text("Tất cả sản phẩm") },
+                            label = { Text("Tất cả sản phẩm: ${products.size}") },
                             selected = productFilter == ProductFilter.ALL && tab == 0,
                             icon = { Icon(Icons.Default.Inventory2, null) },
                             onClick = { openProductFilter(ProductFilter.ALL) }
@@ -892,7 +921,7 @@ fun KhoApp(
                             onClick = { openProductFilter(ProductFilter.LOW_STOCK) }
                         )
                         NavigationDrawerItem(
-                            label = { Text("Đã ẩn") },
+                            label = { Text("Đã ẩn: ${archivedProducts.size}") },
                             selected = productFilter == ProductFilter.ARCHIVED && tab == 0,
                             icon = { Icon(Icons.Default.VisibilityOff, null) },
                             onClick = { openProductFilter(ProductFilter.ARCHIVED) }
@@ -939,8 +968,14 @@ fun KhoApp(
         ) {
         Scaffold(
             topBar = {
+                FrostedBackdrop(
+                    modifier = Modifier.fillMaxWidth().height(72.dp),
+                    tint = MaterialTheme.colorScheme.background,
+                    enabled = appearance.glassEffectEnabled,
+                    shape = androidx.compose.ui.graphics.RectangleShape
+                ) {
                 TopAppBar(
-                    modifier = Modifier.height(72.dp),
+                    modifier = Modifier.fillMaxSize(),
                     navigationIcon = {
                         IconButton(
                             onClick = { scope.launch { drawerState.open() } },
@@ -1014,11 +1049,10 @@ fun KhoApp(
                         }
                     },
                     colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface.copy(
-                            alpha = if (appearance.glassEffectEnabled) 0.82f else 1f
-                        )
+                        containerColor = Color.Transparent
                     )
                 )
+                }
             },
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
@@ -1036,83 +1070,97 @@ fun KhoApp(
                     }
                 }
                 Column(Modifier.navigationBarsPadding().padding(bottom = 6.dp)) {
-                if (appearance.bottomTabStyle == BottomTabStyle.ROUNDED) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 18.dp, vertical = 6.dp)
-                            .height(56.dp),
-                        shape = RoundedCornerShape(percent = 50),
-                        color = MaterialTheme.colorScheme.surface.copy(
-                            alpha = if (appearance.glassEffectEnabled) 0.78f else 1f
-                        ),
-                        tonalElevation = 0.dp,
-                        shadowElevation = 0.dp
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            items.forEachIndexed { index, (title, icon) ->
-                                val selected = tab == index || (index == 0 && tab == 8)
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(56.dp)
-                                        .clickable { selectTab(index) },
-                                    contentAlignment = Alignment.Center
-                                ) {
+                    if (appearance.bottomTabStyle == BottomTabStyle.ROUNDED) {
+                        FrostedBackdrop(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 18.dp, vertical = 6.dp)
+                                .height(appearance.bottomTabHeightDp.dp)
+                                .border(
+                                    1.dp,
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                                    RoundedCornerShape(percent = 50)
+                                ),
+                            tint = MaterialTheme.colorScheme.background,
+                            enabled = appearance.glassEffectEnabled,
+                            shape = RoundedCornerShape(percent = 50)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    appearance.bottomTabSpacingDp.dp
+                                ),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                items.forEachIndexed { index, (title, icon) ->
+                                    val selected = tab == index || (index == 0 && tab == 8)
                                     Box(
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .clip(RoundedCornerShape(percent = 50))
-                                            .background(
-                                                if (selected) {
-                                                    MaterialTheme.colorScheme.secondaryContainer.copy(
-                                                        alpha = if (appearance.glassEffectEnabled) {
-                                                            0.88f
-                                                        } else {
-                                                            1f
-                                                        }
-                                                    )
-                                                } else {
-                                                    Color.Transparent
-                                                }
-                                            ),
+                                        modifier = Modifier.weight(1f).fillMaxHeight()
+                                            .clickable { selectTab(index) },
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Icon(
-                                            icon,
-                                            contentDescription = title,
-                                            tint = if (selected) {
-                                                MaterialTheme.colorScheme.onSecondaryContainer
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            }
-                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .width(68.dp)
+                                                .height(
+                                                    (appearance.bottomTabHeightDp - 10f)
+                                                        .coerceIn(34f, 60f).dp
+                                                )
+                                                .clip(RoundedCornerShape(percent = 50))
+                                                .background(
+                                                    if (selected) {
+                                                        MaterialTheme.colorScheme.secondaryContainer
+                                                    } else {
+                                                        Color.Transparent
+                                                    }
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                icon,
+                                                contentDescription = title,
+                                                tint = if (selected) {
+                                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                },
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                } else {
-                    NavigationBar(
-                        modifier = Modifier.height(60.dp),
-                        windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
-                        containerColor = Color.Transparent,
-                        tonalElevation = 0.dp
-                    ) {
-                        items.forEachIndexed { index, (title, icon) ->
-                            NavigationBarItem(
-                                selected = tab == index || (index == 0 && tab == 8),
-                                onClick = { selectTab(index) },
-                                icon = { Icon(icon, contentDescription = title) },
-                                colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
-                                    selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    indicatorColor = MaterialTheme.colorScheme.secondaryContainer.copy(
-                                        alpha = if (appearance.glassEffectEnabled) 0.22f else 0.14f
+                    } else {
+                        FrostedBackdrop(
+                            modifier = Modifier.fillMaxWidth()
+                                .height(appearance.bottomTabHeightDp.dp),
+                            tint = MaterialTheme.colorScheme.background,
+                            enabled = appearance.glassEffectEnabled,
+                            shape = androidx.compose.ui.graphics.RectangleShape
+                        ) {
+                            NavigationBar(
+                                modifier = Modifier.fillMaxSize(),
+                                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+                                containerColor = Color.Transparent,
+                                tonalElevation = 0.dp
+                            ) {
+                                items.forEachIndexed { index, (title, icon) ->
+                                    NavigationBarItem(
+                                        modifier = Modifier.padding(
+                                            horizontal = appearance.bottomTabSpacingDp.dp / 2
+                                        ),
+                                        selected = tab == index || (index == 0 && tab == 8),
+                                        onClick = { selectTab(index) },
+                                        icon = { Icon(icon, contentDescription = title) },
+                                        colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                                            selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            indicatorColor = MaterialTheme.colorScheme.secondaryContainer
+                                        )
                                     )
-                                )
-                            )
+                                }
+                            }
                         }
-                    }
                     }
                 }
             },
@@ -1516,21 +1564,26 @@ fun KhoApp(
                                     }
                                 }
                             },
-                        containerColor = MaterialTheme.colorScheme.primary.copy(
-                            alpha = if (appearance.glassEffectEnabled) 0.84f else 1f
-                        ),
+                        containerColor = Color.Transparent,
                         contentColor = MaterialTheme.colorScheme.onPrimary
                     ) {
-                        Icon(
-                            if (archiveActions) Icons.Default.Edit else Icons.Default.Add,
-                            contentDescription = if (archiveActions) {
-                                "Xóa các sản phẩm đã chọn"
-                            } else {
-                                "Nhấn giữ 1 giây để di chuyển; chạm để thêm sản phẩm"
-                            },
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(20.dp)
-                        )
+                        FrostedBackdrop(
+                            modifier = Modifier.fillMaxSize(),
+                            tint = MaterialTheme.colorScheme.primary,
+                            enabled = appearance.glassEffectEnabled,
+                            shape = CircleShape
+                        ) {
+                            Icon(
+                                if (archiveActions) Icons.Default.Edit else Icons.Default.Add,
+                                contentDescription = if (archiveActions) {
+                                    "Xóa các sản phẩm đã chọn"
+                                } else {
+                                    "Nhấn giữ 1 giây để di chuyển; chạm để thêm sản phẩm"
+                                },
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.align(Alignment.Center).size(20.dp)
+                            )
+                        }
                     }
                     FloatingActionButton(
                         onClick = {
@@ -1610,18 +1663,25 @@ fun KhoApp(
                                     }
                                 }
                             },
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        containerColor = Color.Transparent,
                         contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                     ) {
-                        Icon(
-                            if (archiveActions) Icons.Default.Restore else Icons.Default.QrCode2,
-                            contentDescription = if (archiveActions) {
-                                "Khôi phục các sản phẩm đã chọn"
-                            } else {
-                                "Nhấn giữ 1 giây để di chuyển; chạm để mở mã QR"
-                            },
-                            modifier = Modifier.size(20.dp)
-                        )
+                        FrostedBackdrop(
+                            modifier = Modifier.fillMaxSize(),
+                            tint = MaterialTheme.colorScheme.secondaryContainer,
+                            enabled = appearance.glassEffectEnabled,
+                            shape = CircleShape
+                        ) {
+                            Icon(
+                                if (archiveActions) Icons.Default.Restore else Icons.Default.QrCode2,
+                                contentDescription = if (archiveActions) {
+                                    "Khôi phục các sản phẩm đã chọn"
+                                } else {
+                                    "Nhấn giữ 1 giây để di chuyển; chạm để mở mã QR"
+                                },
+                                modifier = Modifier.align(Alignment.Center).size(20.dp)
+                            )
+                        }
                     }
                 } else if (tab == 6) {
                     val fabSize = 56.dp
@@ -1632,9 +1692,7 @@ fun KhoApp(
                     ) {
                         FloatingActionButton(
                             onClick = { filterDialogVisible = true },
-                            containerColor = MaterialTheme.colorScheme.primary.copy(
-                                alpha = if (appearance.glassEffectEnabled) 0.84f else 1f
-                            ),
+                            containerColor = Color.Transparent,
                             contentColor = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier
                                 .offset(
@@ -1697,11 +1755,19 @@ fun KhoApp(
                                     }
                                 }
                         ) {
-                            Icon(
-                                Icons.Default.FilterList,
-                                contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để lọc",
-                                modifier = Modifier.size(20.dp)
-                            )
+                            FrostedBackdrop(
+                                modifier = Modifier.fillMaxSize(),
+                                tint = MaterialTheme.colorScheme.primary,
+                                enabled = appearance.glassEffectEnabled,
+                                shape = CircleShape
+                            ) {
+                                Icon(
+                                    Icons.Default.FilterList,
+                                    contentDescription = "Nhấn giữ 1 giây để di chuyển; chạm để lọc",
+                                    modifier = Modifier.align(Alignment.Center).size(20.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
                         }
                     }
                 }
@@ -1937,6 +2003,39 @@ fun KhoApp(
                     qrEditorCreatedImages = emptyList()
                     showQrEditor = false
                 }
+            )
+        }
+        qrCropUri?.let { sourceUri ->
+            PhotoCropDialog(
+                sourceUri = sourceUri,
+                sourceBitmap = null,
+                onDismiss = {
+                    qrCropUri = null
+                    qrCropSourceSize = null
+                    qrCropFile = null
+                },
+                onCropComplete = { bitmap ->
+                    val sourceSize = qrCropSourceSize
+                    qrCropUri = null
+                    qrCropSourceSize = null
+                    scope.launch {
+                        try {
+                            val savedPath = withContext(Dispatchers.IO) {
+                                persistProductImage(context, null, bitmap, sourceSize)
+                            }
+                            qrEditorImagePath = savedPath
+                            qrEditorCreatedImages = qrEditorCreatedImages + savedPath
+                        } catch (failure: IOException) {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                            qrImagePickerMessage =
+                                "Không lưu được ảnh QR đã chỉnh: ${failure.localizedMessage ?: "lỗi tệp"}"
+                        } finally {
+                            qrCropFile?.delete()
+                            qrCropFile = null
+                        }
+                    }
+                },
+                onCropError = {}
             )
         }
         if (showSharedImageDialog && sharedImageUri != null) {
@@ -3022,6 +3121,10 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
                             style = MaterialTheme.typography.titleSmall
                         )
                         Text(
+                            dateTime(movement.happenedAt),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
                             "${movement.branchName} · ${stockMovementTitle(movement.type)}",
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -3036,19 +3139,24 @@ private fun StockHistoryScreen(movements: List<StockMovementView>) {
                         )) ||
                         !isLifecycle
                     ) {
-                        Text(
-                            "${if (isIncoming) "+" else ""}${quantity(movement.quantityDelta)}",
-                            color = if (isIncoming) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.titleMedium
-                        )
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                "${if (isIncoming) "+" else ""}${quantity(movement.quantityDelta)}",
+                                color = if (isIncoming) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                when (movement.unitType) {
+                                    UnitType.WEIGHT.name -> "kg"
+                                    UnitType.PIECE.name -> "cái"
+                                    else -> movement.branchName
+                                },
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 }
-                Text(
-                    dateTime(movement.happenedAt),
-                    modifier = Modifier.padding(start = 34.dp),
-                    style = MaterialTheme.typography.bodySmall
-                )
             }
         }
     }
@@ -5827,6 +5935,34 @@ private fun SettingsScreen(
                             )
                         }
                     }
+                    Text(
+                        "Chiều cao thanh tab: ${appearance.bottomTabHeightDp.toInt()} dp",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Slider(
+                        value = appearance.bottomTabHeightDp,
+                        onValueChange = { height ->
+                            onAppearanceChange(
+                                appearance.copy(bottomTabHeightDp = height)
+                            )
+                        },
+                        valueRange = 48f..72f,
+                        steps = 11
+                    )
+                    Text(
+                        "Khoảng cách giữa các nút: ${appearance.bottomTabSpacingDp.toInt()} dp",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Slider(
+                        value = appearance.bottomTabSpacingDp,
+                        onValueChange = { spacing ->
+                            onAppearanceChange(
+                                appearance.copy(bottomTabSpacingDp = spacing)
+                            )
+                        },
+                        valueRange = 0f..24f,
+                        steps = 11
+                    )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -6737,8 +6873,12 @@ private fun persistProductImage(
     }
 }
 
-private fun importQrImage(context: Context, source: Uri): String {
-    val temporaryFile = File.createTempFile("qr_import_", ".image", context.cacheDir)
+private fun copyQrImageToCropCache(context: Context, source: Uri): File {
+    val directory = File(context.cacheDir, "product-captures")
+    if (!directory.exists() && !directory.mkdirs()) {
+        throw IOException("Không tạo được thư mục ảnh tạm.")
+    }
+    val temporaryFile = File.createTempFile("qr_crop_", ".jpg", directory)
     try {
         val input = context.contentResolver.openInputStream(source)
             ?: throw IOException("Trình chọn ảnh không mở được tệp đã chọn.")
@@ -6750,32 +6890,14 @@ private fun importQrImage(context: Context, source: Uri): String {
         if (temporaryFile.length() == 0L) {
             throw IOException("Ảnh được chọn không có dữ liệu.")
         }
-        return persistQrImageFile(context, temporaryFile)
+        return temporaryFile
     } catch (failure: SecurityException) {
-        throw IOException("Không có quyền đọc ảnh QR đã chọn.", failure)
-    } finally {
         temporaryFile.delete()
+        throw IOException("Không có quyền đọc ảnh QR đã chọn.", failure)
+    } catch (failure: IOException) {
+        temporaryFile.delete()
+        throw failure
     }
-}
-
-private fun persistQrImageFile(context: Context, source: File): String {
-    if (!source.isFile || source.length() == 0L) {
-        throw IOException("Không tìm thấy ảnh QR vừa chụp.")
-    }
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeFile(source.absolutePath, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-        throw IOException("Tệp ảnh QR không hợp lệ.")
-    }
-    var sampleSize = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 1280) {
-        sampleSize *= 2
-    }
-    val bitmap = BitmapFactory.decodeFile(
-        source.absolutePath,
-        BitmapFactory.Options().apply { inSampleSize = sampleSize }
-    ) ?: throw IOException("Không giải mã được ảnh QR.")
-    return persistProductImage(context, null, bitmap, source.length())
 }
 
 private fun queryImageSize(context: Context, uri: Uri): Long? =

@@ -59,7 +59,8 @@ data class StockMovementView(
     val syncStatus: String,
     val productName: String,
     val branchName: String,
-    val productDeleted: Boolean
+    val productDeleted: Boolean,
+    val unitType: String
 )
 
 data class SalesOrder(

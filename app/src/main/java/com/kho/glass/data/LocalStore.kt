@@ -297,7 +297,7 @@ interface KhoDao {
 
     @Query(
         "SELECT m.id, m.branchId, m.type, m.quantityDelta, m.happenedAt, m.referenceId, " +
-            "m.syncStatus, p.name AS productName, b.name AS branchName, " +
+            "m.syncStatus, p.name AS productName, b.name AS branchName, b.unitType AS unitType, " +
             "p.permanentlyDeleted AS productDeleted " +
             "FROM stock_movements m " +
             "INNER JOIN unit_branches b ON b.id = m.branchId " +
