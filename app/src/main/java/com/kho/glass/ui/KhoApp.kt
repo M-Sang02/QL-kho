@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -129,8 +130,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.ModalDrawerSheet
@@ -180,7 +179,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import eightbitlab.com.blurview.BlurView
 import android.widget.Toast
 import coil.compose.AsyncImage
 import com.kho.glass.data.InventoryBackup
@@ -348,13 +346,7 @@ fun KhoApp(
                     .let { if (it.equals("#E8E1F2", ignoreCase = true)) "#E8F2FA" else it },
                 textHex = preferences.getString("text_hex", "#263238") ?: "#263238",
                 customTextEnabled = preferences.getBoolean("custom_text_enabled", false),
-                bottomTabStyle = BottomTabStyle.entries.firstOrNull {
-                    it.name == preferences.getString(
-                        "bottom_tab_style",
-                        BottomTabStyle.STANDARD.name
-                    )
-                } ?: BottomTabStyle.STANDARD,
-                bottomTabHeightDp = preferences.getFloat("bottom_tab_height_dp", 60f)
+                bottomTabHeightDp = preferences.getFloat("bottom_tab_height_dp", 64f)
                     .coerceIn(48f, 72f),
                 bottomTabSpacingDp = preferences.getFloat("bottom_tab_spacing_dp", 10f)
                     .coerceIn(0f, 24f),
@@ -362,6 +354,7 @@ fun KhoApp(
             )
         )
     }
+    val glassBackdropState = remember { BackdropGlassState() }
     val currentLowStockLevels = remember(products) {
         products.flatMap { product ->
             product.branches.filter(::isLowStock).map { it.id to it.stock }
@@ -669,7 +662,6 @@ fun KhoApp(
             .putString("secondary_hex", appearance.secondaryHex)
             .putString("text_hex", appearance.textHex)
             .putBoolean("custom_text_enabled", appearance.customTextEnabled)
-            .putString("bottom_tab_style", appearance.bottomTabStyle.name)
             .putFloat("bottom_tab_height_dp", appearance.bottomTabHeightDp)
             .putFloat("bottom_tab_spacing_dp", appearance.bottomTabSpacingDp)
             .putBoolean("glass_effect_enabled", appearance.glassEffectEnabled)
@@ -1077,93 +1069,68 @@ fun KhoApp(
                     }
                 }
                 Column(Modifier.navigationBarsPadding().padding(bottom = 6.dp)) {
-                    if (appearance.bottomTabStyle == BottomTabStyle.ROUNDED) {
-                        FrostedBackdrop(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 18.dp, vertical = 6.dp)
-                                .height(appearance.bottomTabHeightDp.dp)
-                                .border(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
-                                    RoundedCornerShape(percent = 50)
+                    FrostedBackdrop(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 8.dp)
+                            .height(appearance.bottomTabHeightDp.dp)
+                            .shadow(8.dp, RoundedCornerShape(percent = 50))
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                                RoundedCornerShape(percent = 50)
+                            ),
+                        tint = MaterialTheme.colorScheme.background,
+                        enabled = appearance.glassEffectEnabled,
+                        shape = RoundedCornerShape(percent = 50),
+                        backdrop = glassBackdropState
+                    ) {
+                        val selectedIndex = if (tab == 8) 0 else tab.coerceIn(0, items.lastIndex)
+                        val indicatorColor = MaterialTheme.colorScheme.secondaryContainer
+                        Canvas(Modifier.matchParentSize().padding(horizontal = 10.dp)) {
+                            val gap = appearance.bottomTabSpacingDp.dp.toPx()
+                            val slotWidth = (size.width - gap * (items.size - 1)) / items.size
+                            val inset = 4.dp.toPx()
+                            val heightInset = 7.dp.toPx()
+                            drawRoundRect(
+                                color = indicatorColor,
+                                topLeft = Offset(
+                                    x = selectedIndex * (slotWidth + gap) + inset,
+                                    y = heightInset
                                 ),
-                            tint = MaterialTheme.colorScheme.background,
-                            enabled = appearance.glassEffectEnabled,
-                            shape = RoundedCornerShape(percent = 50)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(
-                                    appearance.bottomTabSpacingDp.dp
+                                size = androidx.compose.ui.geometry.Size(
+                                    width = (slotWidth - inset * 2).coerceAtLeast(0f),
+                                    height = (size.height - heightInset * 2).coerceAtLeast(0f)
                                 ),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                items.forEachIndexed { index, (title, icon) ->
-                                    val selected = tab == index || (index == 0 && tab == 8)
-                                    Box(
-                                        modifier = Modifier.weight(1f).fillMaxHeight()
-                                            .clickable { selectTab(index) },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .width(68.dp)
-                                                .height(
-                                                    (appearance.bottomTabHeightDp - 10f)
-                                                        .coerceIn(34f, 60f).dp
-                                                )
-                                                .clip(RoundedCornerShape(percent = 50))
-                                                .background(
-                                                    if (selected) {
-                                                        MaterialTheme.colorScheme.secondaryContainer
-                                                    } else {
-                                                        Color.Transparent
-                                                    }
-                                                ),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                icon,
-                                                contentDescription = title,
-                                                tint = if (selected) {
-                                                    MaterialTheme.colorScheme.onSecondaryContainer
-                                                } else {
-                                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                                },
-                                                modifier = Modifier.size(24.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
+                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                    x = size.height / 2,
+                                    y = size.height / 2
+                                )
+                            )
                         }
-                    } else {
-                        FrostedBackdrop(
-                            modifier = Modifier.fillMaxWidth()
-                                .height(appearance.bottomTabHeightDp.dp),
-                            tint = MaterialTheme.colorScheme.background,
-                            enabled = appearance.glassEffectEnabled,
-                            shape = androidx.compose.ui.graphics.RectangleShape
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(
+                                appearance.bottomTabSpacingDp.dp
+                            ),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            NavigationBar(
-                                modifier = Modifier.fillMaxSize(),
-                                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
-                                containerColor = Color.Transparent,
-                                tonalElevation = 0.dp
-                            ) {
-                                items.forEachIndexed { index, (title, icon) ->
-                                    NavigationBarItem(
-                                        modifier = Modifier.padding(
-                                            horizontal = appearance.bottomTabSpacingDp.dp / 2
-                                        ),
-                                        selected = tab == index || (index == 0 && tab == 8),
-                                        onClick = { selectTab(index) },
-                                        icon = { Icon(icon, contentDescription = title) },
-                                        colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
-                                            selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            indicatorColor = MaterialTheme.colorScheme.secondaryContainer
-                                        )
+                            items.forEachIndexed { index, (title, icon) ->
+                                val selected = tab == index || (index == 0 && tab == 8)
+                                Box(
+                                    modifier = Modifier.weight(1f).fillMaxHeight()
+                                        .clickable { selectTab(index) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        icon,
+                                        contentDescription = title,
+                                        tint = if (selected) {
+                                            MaterialTheme.colorScheme.onSecondaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        modifier = Modifier.size(24.dp)
                                     )
                                 }
                             }
@@ -1177,6 +1144,7 @@ fun KhoApp(
                 modifier = Modifier
                     .padding(padding)
                     .fillMaxSize()
+                    .captureBackdrop(glassBackdropState, appearance.glassEffectEnabled)
                     .pointerInput(tab) {
                         val edgeSize = 32.dp.toPx()
                         val touchSlop = viewConfiguration.touchSlop
@@ -5930,18 +5898,6 @@ private fun SettingsScreen(
                     }
                 }
                 if (appearanceExpanded) {
-                    Text("Kiểu thanh tab bên dưới", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        BottomTabStyle.entries.forEach { style ->
-                            FilterChip(
-                                selected = appearance.bottomTabStyle == style,
-                                onClick = {
-                                    onAppearanceChange(appearance.copy(bottomTabStyle = style))
-                                },
-                                label = { Text(style.title) }
-                            )
-                        }
-                    }
                     Text(
                         "Chiều cao thanh tab: ${appearance.bottomTabHeightDp.toInt()} dp",
                         style = MaterialTheme.typography.titleSmall

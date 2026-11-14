@@ -15,11 +15,6 @@ enum class ThemeMode(val title: String) {
     CUSTOM("Tùy chỉnh")
 }
 
-enum class BottomTabStyle(val title: String) {
-    STANDARD("Kiểu hiện tại"),
-    ROUNDED("Kiểu bo tròn")
-}
-
 data class AppAppearance(
     val mode: ThemeMode = ThemeMode.SYSTEM,
     val backgroundHex: String = "#F3F8FC",
@@ -27,8 +22,7 @@ data class AppAppearance(
     val secondaryHex: String = "#E8F2FA",
     val textHex: String = "#263238",
     val customTextEnabled: Boolean = false,
-    val bottomTabStyle: BottomTabStyle = BottomTabStyle.STANDARD,
-    val bottomTabHeightDp: Float = 60f,
+    val bottomTabHeightDp: Float = 64f,
     val bottomTabSpacingDp: Float = 10f,
     val glassEffectEnabled: Boolean = false
 )

@@ -122,7 +122,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("com.vanniktech:android-image-cropper:4.7.0")
-    implementation("com.github.Dimezis:BlurView:version-2.0.6")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
