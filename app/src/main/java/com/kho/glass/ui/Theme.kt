@@ -30,7 +30,7 @@ data class AppAppearance(
     val bottomTabStyle: BottomTabStyle = BottomTabStyle.STANDARD,
     val bottomTabHeightDp: Float = 60f,
     val bottomTabSpacingDp: Float = 10f,
-    val glassEffectEnabled: Boolean = true
+    val glassEffectEnabled: Boolean = false
 )
 
 @Composable

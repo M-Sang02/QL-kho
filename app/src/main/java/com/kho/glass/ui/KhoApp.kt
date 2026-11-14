@@ -276,7 +276,14 @@ fun KhoApp(
     val context = LocalContext.current
     val application = context.applicationContext as Application
     val preferences = remember(context) {
-        context.getSharedPreferences("kho-glass-preferences", Context.MODE_PRIVATE)
+        context.getSharedPreferences("kho-glass-preferences", Context.MODE_PRIVATE).also {
+            if (!it.getBoolean("glass_effect_default_off_migrated", false)) {
+                it.edit()
+                    .putBoolean("glass_effect_enabled", false)
+                    .putBoolean("glass_effect_default_off_migrated", true)
+                    .apply()
+            }
+        }
     }
     val initialWarehouses = remember(preferences, userId) {
         loadWarehouses(preferences, userId)
@@ -351,7 +358,7 @@ fun KhoApp(
                     .coerceIn(48f, 72f),
                 bottomTabSpacingDp = preferences.getFloat("bottom_tab_spacing_dp", 10f)
                     .coerceIn(0f, 24f),
-                glassEffectEnabled = preferences.getBoolean("glass_effect_enabled", true)
+                glassEffectEnabled = preferences.getBoolean("glass_effect_enabled", false)
             )
         )
     }
@@ -5970,7 +5977,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Hiệu ứng kính mờ", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "Làm trong mờ thanh trên, thanh dưới và nút thêm sản phẩm.",
+                                "Mặc định tắt. Bật công tắc để làm mờ thanh trên, thanh dưới và nút nổi.",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
