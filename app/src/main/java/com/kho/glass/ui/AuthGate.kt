@@ -201,7 +201,7 @@ private fun PocketBaseSignInScreen(
             value = baseUrl,
             onValueChange = { baseUrl = it },
             label = { Text("Địa chỉ PocketBase") },
-            supportingText = { Text("Máy chủ mặc định: http://192.168.88.123:8090") },
+            supportingText = { Text("PocketBase Cloud: smsaadxoavohzfy.pwz5.pocketbasecloud.com") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )

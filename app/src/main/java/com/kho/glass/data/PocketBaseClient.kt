@@ -23,8 +23,9 @@ class PocketBaseException(
 ) : IOException(message)
 
 object PocketBaseAuth {
-    const val DEFAULT_BASE_URL = "http://192.168.88.123:8090"
+    const val DEFAULT_BASE_URL = "https://smsaadxoavohzfy.pwz5.pocketbasecloud.com"
     private const val LEGACY_EMULATOR_BASE_URL = "http://10.0.2.2:8090"
+    private const val LEGACY_LAN_BASE_URL = "http://192.168.88.123:8090"
     private const val PREFS = "pocketbase-session"
     private const val KEY_BASE_URL = "base_url"
     private const val KEY_TOKEN = "token"
@@ -40,7 +41,9 @@ object PocketBaseAuth {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val savedUrl = preferences.getString(KEY_BASE_URL, DEFAULT_BASE_URL)
             ?: DEFAULT_BASE_URL
-        if (savedUrl != LEGACY_EMULATOR_BASE_URL) return savedUrl
+        if (savedUrl != LEGACY_EMULATOR_BASE_URL && savedUrl != LEGACY_LAN_BASE_URL) {
+            return savedUrl
+        }
         preferences.edit().putString(KEY_BASE_URL, DEFAULT_BASE_URL).apply()
         return DEFAULT_BASE_URL
     }
