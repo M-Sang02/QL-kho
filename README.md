@@ -4,8 +4,8 @@
 
 ## Công nghệ
 - Kotlin + Jetpack Compose + Material 3
-- Firebase Authentication (Anonymous sync; Google Sign-In deferred)
-- Firestore (đồng bộ bản ghi theo phiên bản, có thể khôi phục từ lịch sử thay đổi)
+- PocketBase Authentication (email/mật khẩu)
+- PocketBase REST API (đồng bộ ledger bất biến, chia sẻ kho và danh sách task)
 - Room (lưu sản phẩm, tồn kho, lô, đơn hàng và thanh toán trên thiết bị)
 - WorkManager (đồng bộ khi có mạng và định kỳ)
 - GitHub Actions
@@ -13,14 +13,28 @@
 ## Mở bằng Android Studio / AndroidIDE
 1. Mở thư mục repository.
 2. Chờ Gradle sync; chạy tác vụ `:app:assembleDebug`.
-3. Tạo Firebase project, đăng ký ứng dụng Android với package `com.kho.glass`, rồi bật **Anonymous** trong Firebase Authentication để đồng bộ bằng mã kho không cần Google.
-4. Đặt `google-services.json` vào `app/`. OAuth Android/Web chỉ cần khi Google Sign-In được bật lại; đồng bộ ẩn danh không cần các OAuth client này.
-5. Tạo Firestore database rồi triển khai `firestore.rules` bằng Firebase CLI.
-6. Chạy `:app:assembleDebug`.
+3. Chạy PocketBase và cấu hình các collection cùng API rules bên dưới.
+4. Mở ứng dụng, chọn **Đăng nhập PocketBase** rồi nhập địa chỉ máy chủ, email và mật khẩu; có thể tạo tài khoản ngay trên màn hình đăng nhập.
+5. Dùng cùng tài khoản PocketBase trên từng thiết bị để đồng bộ kho.
 
-## Google Login
+## PocketBase setup
 
-Google Sign-In được tạm hoãn trong giai đoạn này. Đồng bộ qua mã dùng Firebase Anonymous Authentication nên không cần OAuth, SHA fingerprint hay Google Play Services. Ứng dụng mặc định mở kho ngoại tuyến; chạm tài khoản ở đầu menu để bật đồng bộ qua mã. Khi hoàn thiện lại Google Sign-In, đăng ký SHA-1/SHA-256 trong `QL-kho-Firebase-SHA.txt`, bật Google provider và tải lại `google-services.json` có OAuth Web client vào `app/`.
+Ứng dụng dùng collection auth `users`. Tạo collection `task` với `title` (Text). `PocketBaseTaskRepository` có các hàm `addTask`, `readTasks` và `updateTask`. Do schema task chỉ có `title`, các tài khoản đã đăng nhập dùng chung danh sách task; đặt API rules để chỉ user đã xác thực được đọc/thêm/sửa.
+
+Đồng bộ kho cần thêm các Base collection sau. Tạo các trường được liệt kê (tên phân biệt chữ hoa/thường); đặt các trường key là **unique**:
+
+| Collection | Fields |
+|---|---|
+| `warehouses` | `warehouseKey` Text (unique), `ownerUid` Text, `schemaVersion` Number, `activeInviteHash` Text, `createdAt` Number |
+| `warehouse_members` | `membershipKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `userUid` Text, `user` Relation → `users`, `role` Text, `status` Text, `inviteHash` Text, `requestedAt`, `joinedAt`, `decidedAt`, `lastSyncAt`, `expiredAt` Number |
+| `warehouse_invites` | `codeHash` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `ownerUid` Text, `active` Bool, `createdAt`, `updatedAt`, `disabledAt` Number |
+| `warehouse_changes` | `changeKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `writerUid` Text, `entityType` Text, `entityId` Text, `payload` JSON, `revisionAt` Number |
+
+Do not leave these collections open to public access. For `task`, require `@request.auth.id != ""` for list/view/create/update (the collection does not contain an owner field). For warehouse collections, configure rules so only the warehouse owner or a member whose `warehouse` and `user` relations match and whose `status` is `approved` can read changes; only that user may create a change with `writerUid = @request.auth.id`. Restrict invite creation/changes and membership approval to the warehouse owner; users may only create their own pending membership. Keep change records append-only (no update/delete). Validate the rules against your PocketBase version before exposing the server.
+
+The Android emulator reaches the development host at `http://10.0.2.2:8090`; `127.0.0.1` inside Android means the Android device itself. On a physical phone, enter the host's reachable LAN IP/name and bind PocketBase to that interface. For production use HTTPS; HTTP is enabled in the app only to support local development. PocketBase must be reachable over the network for remote sync; Room remains usable offline, and WorkManager syncs on changes, app start, and periodically while online.
+
+Existing Room data can be selected when a PocketBase account is first used on a device and then uploaded by normal sync. The app does not import historical Firestore cloud records; export or migrate that data separately before retiring the old backend.
 
 ### Cố định khóa ký Android
 
@@ -37,7 +51,7 @@ QL_KHO_RELEASE_KEY_ALIAS=ql-kho-release
 QL_KHO_RELEASE_KEY_PASSWORD=<same-as-release-store-password>
 ```
 
-Gradle ưu tiên biến môi trường có cùng tên rồi mới đọc `local.properties`. Vì khóa là PKCS12, đặt `KEY_PASSWORD` giống `STORE_PASSWORD`. Workflow debug hiện không cần GitHub Secrets ký và dùng khóa debug mặc định của runner để APK có thể build trong lúc Google Sign-In được tạm hoãn. Khóa này không có SHA cố định giữa các runner và không dùng được cho Google Sign-In. Khi bật lại Google Sign-In, cấu hình các secrets `QL_KHO_DEBUG_KEYSTORE_BASE64`, `QL_KHO_DEBUG_STORE_PASSWORD`, `QL_KHO_DEBUG_KEY_ALIAS`, `QL_KHO_DEBUG_KEY_PASSWORD` cùng nhóm `QL_KHO_RELEASE_*`; Base64 hóa từng keystore PKCS12 và lưu secrets riêng tư.
+Gradle ưu tiên biến môi trường có cùng tên rồi mới đọc `local.properties`. Vì khóa là PKCS12, đặt `KEY_PASSWORD` giống `STORE_PASSWORD`. Workflow debug dùng khóa mặc định của runner; khóa release cần cấu hình secrets `QL_KHO_DEBUG_KEYSTORE_BASE64`, `QL_KHO_DEBUG_STORE_PASSWORD`, `QL_KHO_DEBUG_KEY_ALIAS`, `QL_KHO_DEBUG_KEY_PASSWORD` cùng nhóm `QL_KHO_RELEASE_*`; Base64 hóa từng keystore PKCS12 và lưu secrets riêng tư.
 
 Trên PowerShell, lấy giá trị Base64 để lưu trực tiếp thành GitHub Actions secret (không đưa vào mã nguồn):
 
@@ -50,9 +64,9 @@ Lấy các giá trị password/alias từ `local.properties` để lưu vào Git
 
 ## Đồng bộ và chia sẻ kho
 
-Room vẫn là nguồn dữ liệu để đọc/ghi ngoại tuyến. Để bật đồng bộ, trong Firebase Console mở **Authentication → Sign-in method → Anonymous** và bật nhà cung cấp này; bảo đảm đã tạo Firestore database và triển khai `firestore.rules`. Trong app, chạm tài khoản ở đầu menu → **Bật đồng bộ qua mã (không cần Google)**; thiết bị phải có Internet lúc kết nối lần đầu. Chọn giữ kho hiện tại, sau đó vào **Cài đặt → Tên kho**, bật **Chia sẻ kho bằng mã** rồi tạo mã hoặc nhập lại mã cũ. Thiết bị tham gia nhập mã trong **Quản lý kho → Nhập mã**; đây là yêu cầu tham gia, chủ kho phải duyệt trước khi đồng bộ dữ liệu. Từ đó WorkManager đồng bộ khi có mạng các sản phẩm, đơn vị, lô, biến động, đơn hàng, dòng đơn, allocations FIFO và thanh toán lên `warehouses/{warehouseId}/changes`. Mỗi phiên bản cloud là một bản ghi bất biến; các thiết bị hợp nhất ledger biến động/tồn kho và thanh toán thay vì thay toàn bộ kho bằng một snapshot. Tắt hoặc đổi mã sẽ ngừng lời mời mới nhưng không xóa mã cũ, thành viên hay dữ liệu. Thành viên đã duyệt còn quyền cho tới khi mã bị tắt ít nhất 30 ngày và thiết bị không đồng bộ ít nhất 30 ngày; sau đó họ cần nhập lại mã và chờ duyệt. Khôi phục cùng mã trước khi quyền hết hạn giữ nguyên liên kết thành viên. Tài khoản ẩn danh gắn với thiết bị; không xóa dữ liệu ứng dụng cho tới khi có luồng khôi phục/liên kết tài khoản.
+Room vẫn là nguồn dữ liệu ngoại tuyến. Đăng nhập PocketBase trước khi bật **Chia sẻ kho bằng mã** trong **Cài đặt → Tên kho**; thiết bị tham gia nhập mã trong **Quản lý kho → Nhập mã**, sau đó chủ kho duyệt yêu cầu. WorkManager đồng bộ khi có mạng các sản phẩm, đơn vị, lô, biến động, đơn hàng, dòng đơn, allocations FIFO và thanh toán vào `warehouse_changes`. Mỗi phiên bản dữ liệu là một bản ghi bất biến; thiết bị hợp nhất ledger thay vì thay toàn bộ kho bằng snapshot. Tắt/đổi mã ngừng lời mời mới; thành viên được duyệt hết hạn nếu mã đã tắt ít nhất 30 ngày và thiết bị không đồng bộ ít nhất 30 ngày. Ảnh sản phẩm tiếp tục lưu cục bộ và không tải lên server.
 
-Mỗi sản phẩm hỗ trợ một ảnh chính và tối đa 10 ảnh thêm trong một danh sách chung. Có thể chọn nhiều ảnh từ thư viện hoặc chụp từng ảnh; ảnh đầu danh sách là ảnh chính. Nhấn giữ một ảnh 1 giây rồi kéo để đổi thứ tự; nút X xóa ảnh ngay cả khi đó là ảnh chính. Ảnh lưu cục bộ trên thiết bị; đường dẫn tệp không được đưa lên Firestore. ZIP sao lưu sản phẩm bao gồm ảnh. Hệ thống phân quyền hiện hỗ trợ chủ kho/thành viên và hạn chế đổi mã cho thành viên; chưa có màn hình chủ kho thu hồi riêng từng thành viên.
+Mỗi sản phẩm hỗ trợ một ảnh chính và tối đa 10 ảnh thêm trong một danh sách chung. Có thể chọn nhiều ảnh từ thư viện hoặc chụp từng ảnh; ảnh đầu danh sách là ảnh chính. Nhấn giữ một ảnh 1 giây rồi kéo để đổi thứ tự; nút X xóa ảnh ngay cả khi đó là ảnh chính. Ảnh lưu cục bộ trên thiết bị; đường dẫn tệp không được đưa lên PocketBase. ZIP sao lưu sản phẩm bao gồm ảnh. Hệ thống phân quyền hiện hỗ trợ chủ kho/thành viên và hạn chế đổi mã cho thành viên; chưa có màn hình chủ kho thu hồi riêng từng thành viên.
 
 Ẩn toàn bộ sản phẩm sẽ lưu ngày ẩn; sản phẩm và ảnh được tự động xóa sau 30 ngày (WorkManager dọn định kỳ, đồng thời kiểm tra khi mở kho). Mục Lịch sử ghi nhận ẩn, khôi phục và xóa bằng biểu tượng riêng; phần mở rộng của sản phẩm đã ẩn hiển thị số ngày còn lại. Có thể chọn **Ẩn một phần tồn kho**, chọn đơn vị Cái/Kg và nhập số lượng; thao tác này giảm tồn kho nhưng vẫn giữ sản phẩm hiển thị.
 
@@ -76,6 +90,6 @@ Cài đặt giao diện dùng biểu tượng cho chế độ theo hệ thống,
 
 Chọn ảnh dùng thư viện ảnh riêng trong ứng dụng, hỗ trợ các định dạng ảnh mà Android giải mã được và quyền truy cập ảnh đầy đủ hoặc ảnh được chọn riêng trên Android 14 trở lên. Camera chụp ảnh độ phân giải đầy đủ; ảnh lớn hơn 5 MB được giảm còn tối đa 720p, trên 10 MB còn tối đa 480p, ảnh nhỏ hơn giữ nguyên độ phân giải. Ảnh từ thư viện, camera hoặc ứng dụng chia sẻ đều mở màn hình cắt/chỉnh ảnh (mặc định tỉ lệ vuông 1:1; có thể chọn tự do, dọc/ngang, xoay và lật) trước khi lưu; thanh công cụ chừa vùng điều hướng điện thoại. Bộ cắt dùng Android Image Cropper của CanHub (Apache-2.0). Có thể chia sẻ ảnh từ thư viện hoặc ứng dụng khác vào Quản lý kho để tạo sản phẩm mới hoặc cập nhật ảnh cho sản phẩm hiện có. Thông báo thêm sản phẩm hiện thành banner nhỏ phía trên, có thanh tiến trình và tự đóng sau 2 giây, không khóa thao tác trên màn hình.
 
-Đăng nhập Google dùng phiên Firebase được lưu trên thiết bị; tài khoản đã đăng nhập trước đó vẫn mở được ứng dụng khi mất mạng và dữ liệu kho tiếp tục đọc/ghi trong Room. Nút tài khoản ở đầu menu mở bảng tài khoản; có thể thêm/đổi tài khoản qua Credential Manager hoặc đăng xuất. Cài đặt cho phép đăng nhập/đăng xuất và đặt ảnh cá nhân riêng cho từng tài khoản. Khi đăng nhập tài khoản chưa có kho cục bộ, ứng dụng hỏi dùng kho hiện có trên thiết bị hay tạo kho mới. Khi chưa có phiên Google, ứng dụng vào kho ngoại tuyến thay vì tự mở màn hình đăng nhập; chạm tài khoản để đăng nhập khi cần.
+Phiên PocketBase được lưu riêng trên thiết bị; khi mất mạng, dữ liệu kho tiếp tục đọc/ghi trong Room và sẽ đồng bộ khi kết nối lại. Nút tài khoản ở đầu menu mở bảng tài khoản để đăng nhập, đổi tài khoản hoặc đăng xuất. Khi đăng nhập tài khoản chưa có kho cục bộ, ứng dụng hỏi dùng kho hiện có trên thiết bị hay tạo kho mới. Nếu chưa đăng nhập, ứng dụng mở kho ngoại tuyến; chạm tài khoản để đăng nhập khi cần. Danh sách `task` dùng cùng tài khoản và các hàm repository đọc/thêm/sửa bản ghi giữa các thiết bị.
 
 Web, duyệt nhập của nhân viên, trả hàng, chỉnh sửa đơn đã hoàn tất, báo cáo nâng cao và thu hồi thành viên riêng lẻ chưa có.

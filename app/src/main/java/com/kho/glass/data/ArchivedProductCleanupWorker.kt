@@ -23,7 +23,7 @@ class ArchivedProductCleanupWorker(
                 .deleteExpiredArchivedProducts()
             val accountUid = inputData.getString(KEY_ACCOUNT_UID).orEmpty()
             if (deleted > 0 && accountUid.isNotBlank()) {
-                FirestoreWarehouseSync.schedule(
+                PocketBaseWarehouseSync.schedule(
                     applicationContext,
                     accountUid,
                     userId,

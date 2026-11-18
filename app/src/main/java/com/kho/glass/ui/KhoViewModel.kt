@@ -13,7 +13,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.kho.glass.data.LocalStore
 import com.kho.glass.data.ArchivedProductCleanupWorker
-import com.kho.glass.data.FirestoreWarehouseSync
+import com.kho.glass.data.PocketBaseWarehouseSync
 import com.kho.glass.data.InventoryImportDecision
 import com.kho.glass.data.Product
 import com.kho.glass.data.SaleLineInput
@@ -75,7 +75,7 @@ class KhoViewModel(
                 if (store.deleteExpiredArchivedProducts() > 0) {
                     message = "Đã tự động xóa sản phẩm ẩn quá 30 ngày và ảnh liên quan."
                     accountUid?.let {
-                        FirestoreWarehouseSync.schedule(
+                        PocketBaseWarehouseSync.schedule(
                             application,
                             it,
                             userId,
@@ -95,7 +95,7 @@ class KhoViewModel(
             }
         }
         accountUid?.let {
-            FirestoreWarehouseSync.schedule(
+            PocketBaseWarehouseSync.schedule(
                 application,
                 it,
                 userId,
@@ -216,7 +216,7 @@ class KhoViewModel(
                 ids.forEach { pendingDeleteTokens.remove(it, token) }
                 pendingDeleteJobs.remove(token)
                 accountUid?.let {
-                    FirestoreWarehouseSync.schedule(
+                    PocketBaseWarehouseSync.schedule(
                         getApplication<Application>(),
                         it,
                         storeUserId,
@@ -406,7 +406,7 @@ class KhoViewModel(
             try {
                 action()
                 accountUid?.let {
-                    FirestoreWarehouseSync.schedule(
+                    PocketBaseWarehouseSync.schedule(
                         getApplication<Application>(),
                         it,
                         storeUserId,

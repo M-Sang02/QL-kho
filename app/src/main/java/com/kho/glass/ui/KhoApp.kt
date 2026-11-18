@@ -263,7 +263,7 @@ fun KhoApp(
     accountEmail: String? = null,
     accountKey: String = "local-device",
     accountPhotoUrl: String? = null,
-    onRequestGoogleSignIn: (() -> Unit)? = null,
+    onRequestSignIn: (() -> Unit)? = null,
     onEnableCodeSync: (() -> Unit)? = null,
     onSignOut: (() -> Unit)? = null,
     sharedImageUri: Uri? = null,
@@ -301,7 +301,7 @@ fun KhoApp(
     val appName = selectedWarehouse.name
     val remoteWarehouseId = selectedWarehouse.cloudId
         ?: UUID.nameUUIDFromBytes("$accountKey|$selectedWarehouseId".toByteArray()).toString()
-    val syncErrorKey = com.kho.glass.data.FirestoreWarehouseSync.syncErrorKey(remoteWarehouseId)
+    val syncErrorKey = com.kho.glass.data.PocketBaseWarehouseSync.syncErrorKey(remoteWarehouseId)
     var syncError by remember(preferences, syncErrorKey) {
         mutableStateOf(preferences.getString(syncErrorKey, null))
     }
@@ -826,7 +826,7 @@ fun KhoApp(
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     accountDisplayName ?: if (localOnly) {
-                                        "Đăng nhập Google"
+                                        "Đăng nhập PocketBase"
                                     } else {
                                         "Tài khoản"
                                     },
@@ -1235,7 +1235,7 @@ fun KhoApp(
                         },
                         onShareCodeEnabledChange = { enabled ->
                             if (enabled && localOnly && onEnableCodeSync == null) {
-                                vm.message = "Chưa cấu hình Firebase để bật đồng bộ qua mã."
+                                vm.message = "Hãy đăng nhập PocketBase để bật đồng bộ qua mã."
                             } else if (enabled) {
                                 preferences.edit()
                                     .putBoolean(
@@ -1256,7 +1256,7 @@ fun KhoApp(
                             } else {
                                 scope.launch {
                                     try {
-                                        com.kho.glass.data.FirestoreWarehouseSync.disableShareCode(
+                                        com.kho.glass.data.PocketBaseWarehouseSync.disableShareCode(
                                             remoteWarehouseId,
                                             accountKey
                                         )
@@ -1269,9 +1269,9 @@ fun KhoApp(
                                         shareCodeEnabled = false
                                     } catch (error: kotlinx.coroutines.CancellationException) {
                                         throw error
-                                    } catch (error: com.google.firebase.FirebaseException) {
+                                    } catch (error: IOException) {
                                         vm.message = "Không tắt được mã chia sẻ: " +
-                                            (error.localizedMessage ?: "lỗi Firebase")
+                                            (error.localizedMessage ?: "lỗi PocketBase")
                                     } catch (error: IllegalStateException) {
                                         vm.message = error.message ?: "Không tắt được mã chia sẻ."
                                     }
@@ -1279,7 +1279,7 @@ fun KhoApp(
                             }
                         },
                         onCreateShareCode = if (!localOnly && accountKey != "local-device") { code ->
-                            com.kho.glass.data.FirestoreWarehouseSync.createShareCode(
+                            com.kho.glass.data.PocketBaseWarehouseSync.createShareCode(
                                 remoteWarehouseId,
                                 accountKey,
                                 code
@@ -1295,13 +1295,13 @@ fun KhoApp(
                             shareCodeDialog = code
                         },
                         onLoadShareRequests = if (!localOnly && accountKey != "local-device") ({
-                            com.kho.glass.data.FirestoreWarehouseSync.pendingShareRequests(
+                            com.kho.glass.data.PocketBaseWarehouseSync.pendingShareRequests(
                                 remoteWarehouseId,
                                 accountKey
                             )
                         }) else null,
                         onDecideShareRequest = if (!localOnly && accountKey != "local-device") { memberUid, approve ->
-                            com.kho.glass.data.FirestoreWarehouseSync.decideShareRequest(
+                            com.kho.glass.data.PocketBaseWarehouseSync.decideShareRequest(
                                 remoteWarehouseId,
                                 accountKey,
                                 memberUid,
@@ -1315,7 +1315,7 @@ fun KhoApp(
                         localOnly = localOnly,
                         syncError = syncError.takeUnless { localOnly },
                         onRetrySync = {
-                            com.kho.glass.data.FirestoreWarehouseSync.schedule(
+                            com.kho.glass.data.PocketBaseWarehouseSync.schedule(
                                 context,
                                 accountKey,
                                 userId,
@@ -1323,8 +1323,8 @@ fun KhoApp(
                                 remoteWarehouseId
                             )
                         },
-                        canChangeAccount = onRequestGoogleSignIn != null,
-                        onRequestGoogleSignIn = onRequestGoogleSignIn,
+                        canChangeAccount = onRequestSignIn != null,
+                        onRequestSignIn = onRequestSignIn,
                         onEnableCodeSync = onEnableCodeSync,
                         onSignOut = onSignOut,
                         onPhotoChange = { photo ->
@@ -1795,11 +1795,11 @@ fun KhoApp(
                 email = accountEmail,
                 photo = visibleAccountPhoto,
                 localOnly = localOnly,
-                canSignIn = onRequestGoogleSignIn != null,
+                canSignIn = onRequestSignIn != null,
                 onDismiss = { accountDialogVisible = false },
                 onAddAccount = {
                     accountDialogVisible = false
-                    onRequestGoogleSignIn?.invoke()
+                    onRequestSignIn?.invoke()
                 },
                 onEnableCodeSync = onEnableCodeSync?.let { enableSync ->
                     {
@@ -2106,12 +2106,12 @@ fun KhoApp(
                     joinWarehouseDialog = false
                     pendingSharedWarehouseCode = null
                     if (localOnly || accountKey == "local-device") {
-                        vm.message = "Hãy bật đồng bộ qua mã trước khi nhập mã kho."
+                        vm.message = "Hãy đăng nhập PocketBase trước khi nhập mã kho."
                     } else {
                         scope.launch {
                             try {
                                 val cloudId =
-                                    com.kho.glass.data.FirestoreWarehouseSync.joinWithShareCode(
+                                com.kho.glass.data.PocketBaseWarehouseSync.joinWithShareCode(
                                         code,
                                         accountKey
                                     )
@@ -2130,9 +2130,9 @@ fun KhoApp(
                                     "Đã gửi yêu cầu tham gia. Chờ chủ kho duyệt trước khi đồng bộ dữ liệu."
                             } catch (error: kotlinx.coroutines.CancellationException) {
                                 throw error
-                            } catch (error: com.google.firebase.FirebaseException) {
+                            } catch (error: IOException) {
                                 vm.message = "Không kết nối được kho: " +
-                                    (error.localizedMessage ?: "lỗi Firebase")
+                                    (error.localizedMessage ?: "lỗi PocketBase")
                             } catch (error: IllegalArgumentException) {
                                 vm.message = error.message ?: "Mã kho không hợp lệ."
                             } catch (error: IllegalStateException) {
@@ -2200,15 +2200,15 @@ fun KhoApp(
                                 scope.launch {
                                     try {
                                         shareCodeDialog =
-                                            com.kho.glass.data.FirestoreWarehouseSync.createShareCode(
+                                            com.kho.glass.data.PocketBaseWarehouseSync.createShareCode(
                                                 remoteId,
                                                 accountKey
                                             )
                                     } catch (error: kotlinx.coroutines.CancellationException) {
                                         throw error
-                                    } catch (error: com.google.firebase.FirebaseException) {
+                                    } catch (error: IOException) {
                                         vm.message = "Không tạo được mã chia sẻ: " +
-                                            (error.localizedMessage ?: "lỗi Firebase")
+                                            (error.localizedMessage ?: "lỗi PocketBase")
                                     } catch (error: IllegalStateException) {
                                         vm.message = error.message ?: "Không thể tạo mã chia sẻ."
                                     }
@@ -5068,9 +5068,9 @@ private fun AccountChooserDialog(
                             onClick = enableSync,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Bật đồng bộ qua mã (không cần Google)")
+                            Text("Đăng nhập PocketBase để bật đồng bộ")
                         }
-                    } ?: Text("Đồng bộ qua Internet cần cấu hình Firebase.")
+                    } ?: Text("Đồng bộ qua Internet cần đăng nhập PocketBase.")
                 }
                 if (canSignIn) {
                     TextButton(
@@ -5079,10 +5079,10 @@ private fun AccountChooserDialog(
                     ) {
                         Icon(Icons.Default.Add, contentDescription = null)
                         Spacer(Modifier.size(10.dp))
-                        Text(if (localOnly) "Đăng nhập Google" else "Thêm hoặc đổi tài khoản")
+                        Text(if (localOnly) "Đăng nhập PocketBase" else "Thêm hoặc đổi tài khoản")
                     }
                 } else if (localOnly) {
-                    Text("Đăng nhập Google sẽ được hoàn thiện sau.")
+                    Text("Đăng nhập PocketBase chưa khả dụng.")
                 }
                 if (!localOnly && onSignOut != null) {
                     HorizontalDivider()
@@ -5386,7 +5386,7 @@ private fun SettingsScreen(
     syncError: String?,
     onRetrySync: () -> Unit,
     canChangeAccount: Boolean,
-    onRequestGoogleSignIn: (() -> Unit)?,
+    onRequestSignIn: (() -> Unit)?,
     onEnableCodeSync: (() -> Unit)?,
     onSignOut: (() -> Unit)?,
     onPhotoChange: (String?) -> Unit,
@@ -5510,9 +5510,9 @@ private fun SettingsScreen(
             shareRequests = loadRequests()
         } catch (error: kotlinx.coroutines.CancellationException) {
             throw error
-        } catch (error: com.google.firebase.FirebaseException) {
+        } catch (error: IOException) {
             onBackupMessage(
-                "Không tải được yêu cầu tham gia: ${error.localizedMessage ?: "lỗi Firebase"}"
+                "Không tải được yêu cầu tham gia: ${error.localizedMessage ?: "lỗi PocketBase"}"
             )
         } catch (error: IllegalStateException) {
             onBackupMessage(error.message ?: "Không tải được yêu cầu tham gia.")
@@ -5541,7 +5541,7 @@ private fun SettingsScreen(
                     UserAvatar(accountPhoto, Modifier.size(56.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Tài khoản", style = MaterialTheme.typography.titleMedium)
-                        Text(accountDisplayName ?: if (localOnly) "Ngoại tuyến" else "Google")
+                        Text(accountDisplayName ?: if (localOnly) "Ngoại tuyến" else "PocketBase")
                         accountEmail?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     }
                 }
@@ -5550,23 +5550,23 @@ private fun SettingsScreen(
                 }
                 if (localOnly) {
                     Text(
-                        "Kho vẫn dùng được ngoại tuyến. Bật đồng bộ qua mã để kết nối thiết bị bằng Internet; không cần Google.",
+                        "Kho vẫn dùng được ngoại tuyến. Đăng nhập PocketBase để đồng bộ với các thiết bị khác qua Internet.",
                         style = MaterialTheme.typography.bodySmall
                     )
                     onEnableCodeSync?.let { enableSync ->
                         TextButton(onClick = enableSync) {
-                            Text("Bật đồng bộ qua mã")
+                            Text("Đăng nhập PocketBase")
                         }
                     }
-                    onRequestGoogleSignIn?.let { signIn ->
+                    onRequestSignIn?.let { signIn ->
                         TextButton(onClick = signIn) {
-                            Text("Đăng nhập Google")
+                            Text("Đăng nhập PocketBase")
                         }
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (canChangeAccount) {
-                            TextButton(onClick = { onRequestGoogleSignIn?.invoke() }) {
+                            TextButton(onClick = { onRequestSignIn?.invoke() }) {
                                 Text("Đổi tài khoản")
                             }
                         }
@@ -5689,10 +5689,10 @@ private fun SettingsScreen(
                                         onShareCodeCreated(code)
                                     } catch (error: kotlinx.coroutines.CancellationException) {
                                         throw error
-                                    } catch (error: com.google.firebase.FirebaseException) {
+                                    } catch (error: IOException) {
                                         onBackupMessage(
                                             "Không tạo được mã chia sẻ: " +
-                                                (error.localizedMessage ?: "lỗi Firebase")
+                                                (error.localizedMessage ?: "lỗi PocketBase")
                                         )
                                     } catch (error: IllegalArgumentException) {
                                         onBackupMessage(error.message ?: "Mã chia sẻ không hợp lệ.")
@@ -5747,7 +5747,7 @@ private fun SettingsScreen(
                                                 shareRequests = onLoadShareRequests()
                                             } catch (error: kotlinx.coroutines.CancellationException) {
                                                 throw error
-                                            } catch (error: com.google.firebase.FirebaseException) {
+                                            } catch (error: IOException) {
                                                 onBackupMessage(
                                                     "Không tải được yêu cầu: " +
                                                         (error.localizedMessage ?: "lỗi mạng")
@@ -5783,10 +5783,10 @@ private fun SettingsScreen(
                                                     shareRequests = shareRequests - memberUid
                                                 } catch (error: kotlinx.coroutines.CancellationException) {
                                                     throw error
-                                                } catch (error: com.google.firebase.FirebaseException) {
+                                                } catch (error: IOException) {
                                                     onBackupMessage(
                                                         "Không duyệt được yêu cầu: " +
-                                                            (error.localizedMessage ?: "lỗi Firebase")
+                                                            (error.localizedMessage ?: "lỗi PocketBase")
                                                     )
                                                 } catch (error: IllegalStateException) {
                                                     onBackupMessage(
@@ -5808,10 +5808,10 @@ private fun SettingsScreen(
                                                     shareRequests = shareRequests - memberUid
                                                 } catch (error: kotlinx.coroutines.CancellationException) {
                                                     throw error
-                                                } catch (error: com.google.firebase.FirebaseException) {
+                                                } catch (error: IOException) {
                                                     onBackupMessage(
                                                         "Không từ chối được yêu cầu: " +
-                                                            (error.localizedMessage ?: "lỗi Firebase")
+                                                            (error.localizedMessage ?: "lỗi PocketBase")
                                                     )
                                                 } catch (error: IllegalStateException) {
                                                     onBackupMessage(

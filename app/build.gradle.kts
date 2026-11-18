@@ -66,6 +66,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        manifestPlaceholders["usesCleartextTraffic"] = "false"
     }
 
     buildFeatures {
@@ -104,11 +105,13 @@ android {
 
     buildTypes {
         getByName("debug") {
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             if (debugSigningValues != null) {
                 signingConfig = signingConfigs.getByName("fixedDebug")
             }
         }
         getByName("release") {
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             if (releaseSigningValues != null) {
                 signingConfig = signingConfigs.getByName("fixedRelease")
             }
@@ -133,15 +136,5 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
-    implementation("com.google.firebase:firebase-auth-ktx:23.1.0")
-    implementation("com.google.firebase:firebase-firestore-ktx:25.1.1")
-    implementation("androidx.credentials:credentials:1.5.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
-    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
-}
-
-if (file("google-services.json").exists()) {
-    apply(plugin = "com.google.gms.google-services")
 }
