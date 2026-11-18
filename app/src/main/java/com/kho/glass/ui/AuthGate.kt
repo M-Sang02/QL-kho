@@ -203,6 +203,7 @@ private fun PocketBaseSignInScreen(
             label = { Text("Địa chỉ PocketBase") },
             supportingText = { Text("PocketBase Cloud: smsaadxoavohzfy.pwz5.pocketbasecloud.com") },
             singleLine = true,
+            readOnly = true,
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(
@@ -282,8 +283,7 @@ private fun PocketBaseSignInScreen(
             Text("Tiếp tục ngoại tuyến")
         }
         Text(
-            "Không dùng 127.0.0.1 trên điện thoại khác: địa chỉ đó trỏ về chính thiết bị. " +
-                "Hãy nhập IP LAN hoặc tên miền HTTPS của máy chủ PocketBase.",
+            "Ứng dụng đang sử dụng PocketBase Cloud đã cấu hình.",
             style = MaterialTheme.typography.bodySmall
         )
         errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }

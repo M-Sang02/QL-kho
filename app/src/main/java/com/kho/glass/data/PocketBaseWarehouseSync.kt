@@ -1,6 +1,7 @@
 package com.kho.glass.data
 
 import android.content.Context
+import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -23,6 +24,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object PocketBaseWarehouseSync {
+    private const val TAG = "PocketBaseWarehouseSync"
     private const val INPUT_ACCOUNT_UID = "account_uid"
     private const val INPUT_STORAGE_USER_ID = "storage_user_id"
     private const val INPUT_LOCAL_WAREHOUSE_ID = "local_warehouse_id"
@@ -47,6 +49,7 @@ object PocketBaseWarehouseSync {
                     .put("warehouseKey", warehouseId)
                     .put("ownerUid", ownerUid)
                     .put("schemaVersion", 1)
+                    .put("activeInviteHash", "")
                     .put("createdAt", System.currentTimeMillis())
             )
         } else {
@@ -85,7 +88,6 @@ object PocketBaseWarehouseSync {
             .put("warehouse", checkNotNull(getWarehouse(warehouseId)).getString("id"))
             .put("ownerUid", ownerUid)
             .put("active", true)
-            .put("disabledAt", JSONObject.NULL)
             .put("updatedAt", now)
         if (invite == null) {
             createRecord(INVITES, inviteFields.put("createdAt", now))
@@ -270,23 +272,39 @@ object PocketBaseWarehouseSync {
         parameters: WorkerParameters
     ) : CoroutineWorker(context, parameters) {
         override suspend fun doWork(): Result {
-            val uid = inputData.getString(INPUT_ACCOUNT_UID) ?: return Result.failure()
-            val storageUserId = inputData.getString(INPUT_STORAGE_USER_ID) ?: return Result.failure()
-            val localWarehouseId =
-                inputData.getString(INPUT_LOCAL_WAREHOUSE_ID) ?: return Result.failure()
-            val remoteWarehouseId =
-                inputData.getString(INPUT_REMOTE_WAREHOUSE_ID) ?: return Result.failure()
+            val uid = inputData.getString(INPUT_ACCOUNT_UID) ?: run {
+                Log.e(PocketBaseWarehouseSync.TAG, "Sync stopped: account ID is missing.")
+                return Result.failure()
+            }
+            val storageUserId = inputData.getString(INPUT_STORAGE_USER_ID) ?: run {
+                Log.e(PocketBaseWarehouseSync.TAG, "Sync stopped: local storage ID is missing.")
+                return Result.failure()
+            }
+            val localWarehouseId = inputData.getString(INPUT_LOCAL_WAREHOUSE_ID) ?: run {
+                Log.e(PocketBaseWarehouseSync.TAG, "Sync stopped: local warehouse ID is missing.")
+                return Result.failure()
+            }
+            val remoteWarehouseId = inputData.getString(INPUT_REMOTE_WAREHOUSE_ID) ?: run {
+                Log.e(PocketBaseWarehouseSync.TAG, "Sync stopped: remote warehouse ID is missing.")
+                return Result.failure()
+            }
+            Log.i(PocketBaseWarehouseSync.TAG, "Starting warehouse sync.")
             PocketBaseAuth.initialize(applicationContext)
             val session = PocketBaseAuth.session(applicationContext)
-            if (session?.userId != uid) return Result.success()
+            if (session?.userId != uid) {
+                Log.w(PocketBaseWarehouseSync.TAG, "Sync skipped because the active PocketBase account changed.")
+                return Result.success()
+            }
             val store = LocalStore(applicationContext, storageUserId, localWarehouseId)
             return try {
                 synchronize(uid, remoteWarehouseId, store)
                 saveSyncError(remoteWarehouseId, null)
+                Log.i(PocketBaseWarehouseSync.TAG, "Warehouse sync completed successfully.")
                 Result.success()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: PocketBaseException) {
+                Log.e(PocketBaseWarehouseSync.TAG, "PocketBase rejected warehouse sync with HTTP ${error.statusCode}.", error)
                 saveSyncError(remoteWarehouseId, error.localizedMessage ?: "PocketBase lỗi.")
                 if (error.statusCode >= 500 || error.statusCode == 408 || error.statusCode == 429) {
                     Result.retry()
@@ -294,11 +312,17 @@ object PocketBaseWarehouseSync {
                     Result.failure(workDataOf("error" to (error.localizedMessage ?: "PocketBase lỗi")))
                 }
             } catch (error: IOException) {
+                Log.e(PocketBaseWarehouseSync.TAG, "Warehouse sync failed because of a network or I/O error.", error)
                 saveSyncError(remoteWarehouseId, error.localizedMessage ?: "Lỗi kết nối mạng.")
                 Result.retry()
             } catch (error: IllegalStateException) {
+                Log.e(PocketBaseWarehouseSync.TAG, "Warehouse sync stopped because its state is invalid.", error)
                 saveSyncError(remoteWarehouseId, error.localizedMessage ?: "Dữ liệu đồng bộ không hợp lệ.")
                 Result.failure(workDataOf("error" to (error.localizedMessage ?: "Invalid cloud data")))
+            } catch (error: Exception) {
+                Log.e(PocketBaseWarehouseSync.TAG, "Warehouse sync failed unexpectedly.", error)
+                saveSyncError(remoteWarehouseId, error.localizedMessage ?: "Lỗi đồng bộ không xác định.")
+                Result.failure(workDataOf("error" to (error.localizedMessage ?: "Unexpected sync error")))
             } finally {
                 store.close()
             }
@@ -324,6 +348,7 @@ object PocketBaseWarehouseSync {
                             .put("warehouseKey", warehouseId)
                             .put("ownerUid", uid)
                             .put("schemaVersion", 1)
+                            .put("activeInviteHash", "")
                             .put("createdAt", System.currentTimeMillis())
                     )
                 } catch (error: PocketBaseException) {
@@ -388,7 +413,12 @@ object PocketBaseWarehouseSync {
 
             val localRecords = store.exportCloudSnapshot().toCloudRecords()
             val remoteRecords = listRecords(CHANGES, "warehouseKey = ${filterValue(warehouseId)}")
+            Log.i(
+                TAG,
+                "Loaded ${localRecords.size} local record(s) and ${remoteRecords.size} remote change(s)."
+            )
             val existingKeys = remoteRecords.mapTo(HashSet()) { it.optString("changeKey") }
+            var uploadedCount = 0
             for (record in localRecords) {
                 val changeKey = record.changeKey(uid)
                 if (changeKey !in existingKeys) {
@@ -405,15 +435,21 @@ object PocketBaseWarehouseSync {
                             .put("revisionAt", System.currentTimeMillis())
                     )
                     existingKeys += changeKey
+                    uploadedCount++
                 }
             }
+            Log.i(TAG, "Uploaded $uploadedCount new warehouse change(s).")
 
             val cloudRecords = listRecords(CHANGES, "warehouseKey = ${filterValue(warehouseId)}")
-                .mapNotNull { record ->
+                .map { record ->
                     val type = record.optString("entityType").takeIf(String::isNotBlank)
-                        ?: return@mapNotNull null
+                        ?: throw IllegalStateException(
+                            "PocketBase change ${record.optString("id")} has no entityType."
+                        )
                     val id = record.optString("entityId").takeIf(String::isNotBlank)
-                        ?: return@mapNotNull null
+                        ?: throw IllegalStateException(
+                            "PocketBase change ${record.optString("id")} has no entityId."
+                        )
                     val payload = record.optJSONObject("payload")
                         ?: throw IllegalStateException("Bản ghi PocketBase ${record.optString("id")} không có payload hợp lệ.")
                     WarehouseChangeRecord(
@@ -423,6 +459,7 @@ object PocketBaseWarehouseSync {
                         payload.toMap()
                     )
                 }
+            Log.i(TAG, "Applying ${cloudRecords.size} remote warehouse change(s) locally.")
             store.mergeCloudSnapshot(cloudRecords.toLatestSnapshot())
             if (role != "owner") {
                 updateRecord(
@@ -481,9 +518,11 @@ object PocketBaseWarehouseSync {
             val response = PocketBaseAuth.request(
                 "/api/collections/$collection/records$query"
             )
-            val items = response.optJSONArray("items") ?: JSONArray()
+            val items = response.optJSONArray("items")
+                ?: throw IOException("PocketBase collection $collection returned no items array.")
             for (index in 0 until items.length()) {
-                items.optJSONObject(index)?.let(records::add)
+                records += items.optJSONObject(index)
+                    ?: throw IOException("PocketBase collection $collection returned an invalid record.")
             }
             totalPages = response.optInt("totalPages", page)
             page++

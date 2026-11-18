@@ -19,20 +19,20 @@
 
 ## PocketBase setup
 
-Ứng dụng dùng collection auth `users`. Tạo collection `task` với `title` (Text). `PocketBaseTaskRepository` có các hàm `addTask`, `readTasks` và `updateTask`. Do schema task chỉ có `title`, các tài khoản đã đăng nhập dùng chung danh sách task; đặt API rules để chỉ user đã xác thực được đọc/thêm/sửa.
+Ứng dụng dùng collection auth `users`. Tạo collection `task` với `title` (Text). `PocketBaseTaskRepository` có các hàm `addTask`, `readTasks` và `updateTask`, nhưng hiện chưa có màn hình nào trong ứng dụng gọi các hàm này. Đồng bộ hàng hóa/đơn hàng hiện tại dùng các collection kho riêng được liệt kê bên dưới; chỉ tạo `task` là chưa đủ để bật đồng bộ kho. Do schema `task` chỉ có `title`, các tài khoản đã đăng nhập dùng chung danh sách task; đặt API rules để chỉ user đã xác thực được đọc/thêm/sửa. Nhật ký kết nối hiển thị trong Logcat với tag `PocketBaseClient`, thao tác task với tag `PocketBaseTaskSync`, và đồng bộ kho với tag `PocketBaseWarehouseSync`; không ghi token hoặc nội dung task vào log.
 
-Đồng bộ kho cần thêm các Base collection sau. Tạo các trường được liệt kê (tên phân biệt chữ hoa/thường); đặt các trường key là **unique**:
+Đồng bộ kho cần các Base collection sau. Tên collection và tên field phân biệt chữ hoa/thường. Các trường đánh dấu **bắt buộc** phải tồn tại; các trường **tùy chọn** phải cho phép bỏ trống vì ứng dụng chỉ ghi chúng khi có giá trị. Đặt các trường key là **unique**:
 
 | Collection | Fields |
 |---|---|
-| `warehouses` | `warehouseKey` Text (unique), `ownerUid` Text, `schemaVersion` Number, `activeInviteHash` Text, `createdAt` Number |
-| `warehouse_members` | `membershipKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `userUid` Text, `user` Relation → `users`, `role` Text, `status` Text, `inviteHash` Text, `requestedAt`, `joinedAt`, `decidedAt`, `lastSyncAt`, `expiredAt` Number |
-| `warehouse_invites` | `codeHash` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `ownerUid` Text, `active` Bool, `createdAt`, `updatedAt`, `disabledAt` Number |
-| `warehouse_changes` | `changeKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `writerUid` Text, `entityType` Text, `entityId` Text, `payload` JSON, `revisionAt` Number |
+| `warehouses` | **Bắt buộc:** `warehouseKey` Text (unique), `ownerUid` Text, `schemaVersion` Number, `activeInviteHash` Text, `createdAt` Number |
+| `warehouse_members` | **Bắt buộc:** `membershipKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `userUid` Text, `user` Relation → `users`, `role` Text, `status` Text, `joinedAt` Number. **Tùy chọn:** `inviteHash` Text, `requestedAt`, `decidedAt`, `lastSyncAt`, `expiredAt` Number |
+| `warehouse_invites` | **Bắt buộc:** `codeHash` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `ownerUid` Text, `active` Bool, `createdAt`, `updatedAt` Number. **Tùy chọn:** `disabledAt` Number |
+| `warehouse_changes` | **Bắt buộc:** `changeKey` Text (unique), `warehouseKey` Text, `warehouse` Relation → `warehouses`, `writerUid` Text, `entityType` Text, `entityId` Text, `payload` JSON, `revisionAt` Number |
 
 Do not leave these collections open to public access. For `task`, require `@request.auth.id != ""` for list/view/create/update (the collection does not contain an owner field). For warehouse collections, configure rules so only the warehouse owner or a member whose `warehouse` and `user` relations match and whose `status` is `approved` can read changes; only that user may create a change with `writerUid = @request.auth.id`. Restrict invite creation/changes and membership approval to the warehouse owner; users may only create their own pending membership. Keep change records append-only (no update/delete). Validate the rules against your PocketBase version before exposing the server.
 
-The default PocketBase URL is `https://smsaadxoavohzfy.pwz5.pocketbasecloud.com`; change it on the sign-in screen if the server address changes. Older saved emulator and LAN development URLs are migrated to this cloud URL. PocketBase must be reachable over the network for remote sync; Room remains usable offline, and WorkManager syncs on changes, app start, and periodically while online.
+The PocketBase URL is fixed to `https://smsaadxoavohzfy.pwz5.pocketbasecloud.com`. Any previously saved server URL is replaced with this endpoint on startup. PocketBase must be reachable over the network for remote sync; Room remains usable offline, and WorkManager syncs on changes, app start, and periodically while online.
 
 Existing Room data can be selected when a PocketBase account is first used on a device and then uploaded by normal sync. The app does not import historical Firestore cloud records; export or migrate that data separately before retiring the old backend.
 

@@ -1,6 +1,7 @@
 package com.kho.glass.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -24,8 +25,7 @@ class PocketBaseException(
 
 object PocketBaseAuth {
     const val DEFAULT_BASE_URL = "https://smsaadxoavohzfy.pwz5.pocketbasecloud.com"
-    private const val LEGACY_EMULATOR_BASE_URL = "http://10.0.2.2:8090"
-    private const val LEGACY_LAN_BASE_URL = "http://192.168.88.123:8090"
+    private const val TAG = "PocketBaseClient"
     private const val PREFS = "pocketbase-session"
     private const val KEY_BASE_URL = "base_url"
     private const val KEY_TOKEN = "token"
@@ -41,10 +41,10 @@ object PocketBaseAuth {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val savedUrl = preferences.getString(KEY_BASE_URL, DEFAULT_BASE_URL)
             ?: DEFAULT_BASE_URL
-        if (savedUrl != LEGACY_EMULATOR_BASE_URL && savedUrl != LEGACY_LAN_BASE_URL) {
-            return savedUrl
+        if (savedUrl != DEFAULT_BASE_URL) {
+            preferences.edit().putString(KEY_BASE_URL, DEFAULT_BASE_URL).apply()
+            Log.i(TAG, "Updated saved PocketBase URL to the configured cloud endpoint.")
         }
-        preferences.edit().putString(KEY_BASE_URL, DEFAULT_BASE_URL).apply()
         return DEFAULT_BASE_URL
     }
 
@@ -181,6 +181,11 @@ object PocketBaseAuth {
     ): JSONObject = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
+            val safePath = path.substringBefore('?')
+            Log.d(
+                TAG,
+                "Request $method $safePath (authenticated=${token != null}, host=${URL(baseUrl).host})"
+            )
             val activeConnection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 15_000
@@ -213,13 +218,20 @@ object PocketBaseAuth {
                 }
             }
             if (status !in 200..299) {
+                Log.e(TAG, "Request $method $safePath failed with HTTP $status.")
                 val message = response.optString("message").ifBlank { "Lỗi HTTP $status." }
                 throw PocketBaseException(status, "PocketBase: $message")
             }
+            Log.d(TAG, "Request $method $safePath completed with HTTP $status.")
             response
         } catch (error: PocketBaseException) {
             throw error
         } catch (error: IOException) {
+            Log.e(
+                TAG,
+                "Network error for $method ${path.substringBefore('?')}: ${error.localizedMessage}",
+                error
+            )
             throw IOException("Không kết nối được PocketBase: ${error.localizedMessage ?: "lỗi mạng."}", error)
         } finally {
             connection?.disconnect()
