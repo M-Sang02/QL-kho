@@ -515,7 +515,7 @@ object PocketBaseWarehouseSync {
         URLEncoder.encode(value, Charsets.UTF_8.name())
 }
 
-private data class CloudRecord(
+internal data class CloudRecord(
     val entityType: String,
     val entityId: String,
     val revisionAt: Long,
