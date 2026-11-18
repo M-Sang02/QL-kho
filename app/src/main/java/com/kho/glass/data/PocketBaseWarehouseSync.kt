@@ -416,7 +416,7 @@ object PocketBaseWarehouseSync {
                         ?: return@mapNotNull null
                     val payload = record.optJSONObject("payload")
                         ?: throw IllegalStateException("Bản ghi PocketBase ${record.optString("id")} không có payload hợp lệ.")
-                    CloudRecord(
+                    WarehouseChangeRecord(
                         type,
                         id,
                         record.serverRevisionAt(),
@@ -515,7 +515,7 @@ object PocketBaseWarehouseSync {
         URLEncoder.encode(value, Charsets.UTF_8.name())
 }
 
-internal data class CloudRecord(
+internal data class WarehouseChangeRecord(
     val entityType: String,
     val entityId: String,
     val revisionAt: Long,
@@ -525,20 +525,20 @@ internal data class CloudRecord(
         sha256("$uid|$entityType|$entityId|${canonical(payload)}")
 }
 
-private fun CloudWarehouseSnapshot.toCloudRecords(): List<CloudRecord> = buildList {
+private fun CloudWarehouseSnapshot.toCloudRecords(): List<WarehouseChangeRecord> = buildList {
     products.forEach { row ->
-        add(CloudRecord("products", row.id, 0L, row.toCloudMap().toMutableMap().apply {
+        add(WarehouseChangeRecord("products", row.id, 0L, row.toCloudMap().toMutableMap().apply {
             put("imagePath", null)
             put("additionalImagePaths", "[]")
         }))
     }
-    branches.forEach { add(CloudRecord("branches", it.id, 0L, it.toCloudMap())) }
-    batches.forEach { add(CloudRecord("batches", it.id, 0L, it.toCloudMap())) }
-    movements.forEach { add(CloudRecord("movements", it.id, 0L, it.toCloudMap())) }
-    orders.forEach { add(CloudRecord("orders", it.id, 0L, it.toCloudMap())) }
-    orderLines.forEach { add(CloudRecord("orderLines", it.id, 0L, it.toCloudMap())) }
-    allocations.forEach { add(CloudRecord("allocations", it.id, 0L, it.toCloudMap())) }
-    payments.forEach { add(CloudRecord("payments", it.id, 0L, it.toCloudMap())) }
+    branches.forEach { add(WarehouseChangeRecord("branches", it.id, 0L, it.toCloudMap())) }
+    batches.forEach { add(WarehouseChangeRecord("batches", it.id, 0L, it.toCloudMap())) }
+    movements.forEach { add(WarehouseChangeRecord("movements", it.id, 0L, it.toCloudMap())) }
+    orders.forEach { add(WarehouseChangeRecord("orders", it.id, 0L, it.toCloudMap())) }
+    orderLines.forEach { add(WarehouseChangeRecord("orderLines", it.id, 0L, it.toCloudMap())) }
+    allocations.forEach { add(WarehouseChangeRecord("allocations", it.id, 0L, it.toCloudMap())) }
+    payments.forEach { add(WarehouseChangeRecord("payments", it.id, 0L, it.toCloudMap())) }
 }
 
 private fun Any.toCloudMap(): Map<String, Any?> =
@@ -549,11 +549,11 @@ private fun Any.toCloudMap(): Map<String, Any?> =
             field.name to field.get(this)
         }
 
-private fun List<CloudRecord>.toLatestSnapshot(): CloudWarehouseSnapshot {
+private fun List<WarehouseChangeRecord>.toLatestSnapshot(): CloudWarehouseSnapshot {
     val allRecords = this
     val latest = groupBy { it.entityType to it.entityId }
         .mapValues { (_, revisions) ->
-            revisions.maxWithOrNull(compareBy<CloudRecord> { it.revisionAt }.thenBy {
+            revisions.maxWithOrNull(compareBy<WarehouseChangeRecord> { it.revisionAt }.thenBy {
                 canonical(it.payload)
             }) ?: error("Không có phiên bản cloud hợp lệ.")
         }
