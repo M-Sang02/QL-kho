@@ -1,7 +1,7 @@
 package com.kho.glass.data
 
 import android.content.Context
-import org.json.JSONArray
+import java.io.IOException
 import org.json.JSONObject
 
 data class PocketBaseTask(
@@ -11,17 +11,25 @@ data class PocketBaseTask(
 
 class PocketBaseTaskRepository(private val context: Context) {
     suspend fun readTasks(): List<PocketBaseTask> {
-        val response = PocketBaseAuth.request(
-            context,
-            "/api/collections/task/records?sort=-created&perPage=200"
-        )
-        val items = response.optJSONArray("items") ?: JSONArray()
-        return buildList(items.length()) {
+        val tasks = mutableListOf<PocketBaseTask>()
+        var page = 1
+        var totalPages: Int
+        do {
+            val response = PocketBaseAuth.request(
+                context,
+                "/api/collections/task/records?page=$page&sort=-created&perPage=200"
+            )
+            val items = response.optJSONArray("items")
+                ?: throw IOException("PocketBase trả về danh sách task không hợp lệ.")
             for (index in 0 until items.length()) {
-                val record = items.optJSONObject(index) ?: continue
-                add(PocketBaseTask(record.getString("id"), record.getString("title")))
+                val record = items.optJSONObject(index)
+                    ?: throw IOException("PocketBase trả về task không hợp lệ.")
+                tasks += record.toTask()
             }
-        }
+            totalPages = response.optInt("totalPages", page).coerceAtLeast(page)
+            page++
+        } while (page <= totalPages)
+        return tasks
     }
 
     suspend fun addTask(title: String): PocketBaseTask {
@@ -33,7 +41,7 @@ class PocketBaseTaskRepository(private val context: Context) {
             "POST",
             JSONObject().put("title", cleanTitle)
         )
-        return PocketBaseTask(record.getString("id"), record.getString("title"))
+        return record.toTask()
     }
 
     suspend fun updateTask(id: String, title: String): PocketBaseTask {
@@ -49,6 +57,20 @@ class PocketBaseTaskRepository(private val context: Context) {
             "PATCH",
             JSONObject().put("title", cleanTitle)
         )
-        return PocketBaseTask(record.getString("id"), record.getString("title"))
+        return record.toTask()
+    }
+
+    private fun JSONObject.toTask(): PocketBaseTask {
+        val id = optString("id").takeIf(String::isNotBlank)
+            ?: throw IOException("PocketBase trả về task không có mã hợp lệ.")
+        if (!has("title") || isNull("title")) {
+            throw IOException("PocketBase trả về task không có tiêu đề hợp lệ.")
+        }
+        val title = try {
+            getString("title")
+        } catch (error: org.json.JSONException) {
+            throw IOException("PocketBase trả về tiêu đề task không hợp lệ.", error)
+        }
+        return PocketBaseTask(id, title)
     }
 }

@@ -23,7 +23,8 @@ class PocketBaseException(
 ) : IOException(message)
 
 object PocketBaseAuth {
-    const val DEFAULT_BASE_URL = "http://10.0.2.2:8090"
+    const val DEFAULT_BASE_URL = "http://192.168.88.123:8090"
+    private const val LEGACY_EMULATOR_BASE_URL = "http://10.0.2.2:8090"
     private const val PREFS = "pocketbase-session"
     private const val KEY_BASE_URL = "base_url"
     private const val KEY_TOKEN = "token"
@@ -35,17 +36,21 @@ object PocketBaseAuth {
         applicationContext = context.applicationContext
     }
 
-    fun baseUrl(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_BASE_URL, DEFAULT_BASE_URL)
+    fun baseUrl(context: Context): String {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val savedUrl = preferences.getString(KEY_BASE_URL, DEFAULT_BASE_URL)
             ?: DEFAULT_BASE_URL
+        if (savedUrl != LEGACY_EMULATOR_BASE_URL) return savedUrl
+        preferences.edit().putString(KEY_BASE_URL, DEFAULT_BASE_URL).apply()
+        return DEFAULT_BASE_URL
+    }
 
     fun session(context: Context): PocketBaseSession? {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val token = preferences.getString(KEY_TOKEN, null) ?: return null
         val userId = preferences.getString(KEY_USER_ID, null) ?: return null
         return PocketBaseSession(
-            baseUrl = preferences.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL,
+            baseUrl = baseUrl(context),
             token = token,
             userId = userId,
             email = preferences.getString(KEY_EMAIL, "").orEmpty()
@@ -171,25 +176,31 @@ object PocketBaseAuth {
         body: JSONObject?,
         token: String?
     ): JSONObject = withContext(Dispatchers.IO) {
-        val connection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            setRequestProperty("Accept", "application/json")
-            token?.let { setRequestProperty("Authorization", it) }
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            }
-        }
+        var connection: HttpURLConnection? = null
         try {
+            val activeConnection = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                setRequestProperty("Accept", "application/json")
+                token?.let { setRequestProperty("Authorization", it) }
+                if (body != null) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+            }
+            connection = activeConnection
             body?.let {
-                connection.outputStream.use { output ->
+                activeConnection.outputStream.use { output ->
                     output.write(it.toString().toByteArray(Charsets.UTF_8))
                 }
             }
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val status = activeConnection.responseCode
+            val stream = if (status in 200..299) {
+                activeConnection.inputStream
+            } else {
+                activeConnection.errorStream
+            }
             val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             val response = if (responseText.isBlank()) JSONObject() else {
                 try {
@@ -208,7 +219,7 @@ object PocketBaseAuth {
         } catch (error: IOException) {
             throw IOException("Không kết nối được PocketBase: ${error.localizedMessage ?: "lỗi mạng."}", error)
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 
